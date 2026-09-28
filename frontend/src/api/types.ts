@@ -119,6 +119,18 @@ export interface ChartDTO {
   spec: Record<string, unknown>;
 }
 
+/** Immutable artifact emitted by the Chart Agent (`GET /api/chart-specs/{id}`). */
+export interface ChartSpecDTO {
+  id: string;
+  version: number;
+  status: "ready" | "failed";
+  title: string;
+  chart_spec: Record<string, unknown>;
+  dataset_hash: string;
+  content_hash: string;
+  created_at: string;
+}
+
 export interface ReportSummaryDTO {
   id: string;
   title: string;

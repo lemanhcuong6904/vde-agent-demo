@@ -1,14 +1,14 @@
 /** Artifact ids in message text (spec §3.2 ids): `ds_…` dataset, `ch_…` chart, `rp_…` report.
  * Has a capture group so `String.split` yields tokens at odd indices. */
-export const ARTIFACT_SPLIT = /(\b(?:ds|ch|rp)_[0-9a-f]{12}\b)/;
+export const ARTIFACT_SPLIT = /(\b(?:ds|ch|csp|rp)_[0-9a-f]{12}\b)/;
 
-export const ARTIFACT_EXACT = /^(?:ds|ch|rp)_[0-9a-f]{12}$/;
+export const ARTIFACT_EXACT = /^(?:ds|ch|csp|rp)_[0-9a-f]{12}$/;
 
 export type ArtifactKind = "dataset" | "chart" | "report";
 
 export function artifactKind(id: string): ArtifactKind {
   if (id.startsWith("ds_")) return "dataset";
-  if (id.startsWith("ch_")) return "chart";
+  if (id.startsWith("ch_") || id.startsWith("csp_")) return "chart";
   return "report";
 }
 

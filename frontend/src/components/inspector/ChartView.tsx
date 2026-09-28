@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import type { VisualizationSpec } from "vega-embed";
-import { useChart } from "../../api/queries";
+import { useChart, useChartSpec } from "../../api/queries";
 import { ArtifactLink } from "../ArtifactLink";
 
 /** Vega-Lite chart (`GET /api/charts/{id}`) rendered with vega-embed (loaded lazily). */
 export function ChartView({ id }: { id: string }) {
-  const query = useChart(id);
+  const isImmutable = id.startsWith("csp_");
+  const legacyQuery = useChart(id);
+  const immutableQuery = useChartSpec(id);
+  const query = isImmutable ? immutableQuery : legacyQuery;
   const container = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
-  const spec = query.data?.spec;
+  const spec = isImmutable ? immutableQuery.data?.chart_spec : legacyQuery.data?.spec;
 
   useEffect(() => {
     const el = container.current;
@@ -42,10 +45,14 @@ export function ChartView({ id }: { id: string }) {
     <figure className="chart">
       <figcaption className="chart-head">
         <span className="mono artifact-id">{id}</span>
-        <span className="chart-title">{query.data.title}</span>
-        <span className="muted small">
-          from <ArtifactLink id={query.data.dataset_id} />
-        </span>
+        <span className="chart-title">{query.data?.title}</span>
+        {isImmutable ? (
+          <span className="muted small">immutable ChartSpec</span>
+        ) : (
+          <span className="muted small">
+            from <ArtifactLink id={legacyQuery.data!.dataset_id} />
+          </span>
+        )}
       </figcaption>
       <div className="chart-canvas" ref={container} />
       {error && <div className="error-text">Chart failed to render: {error}</div>}

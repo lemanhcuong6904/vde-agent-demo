@@ -2,6 +2,7 @@ import type {
   AgentDTO,
   CancelTaskResponseDTO,
   ChartDTO,
+  ChartSpecDTO,
   DatasetDTO,
   ErrorEnvelopeDTO,
   MessagesPageDTO,
@@ -139,6 +140,10 @@ export class ApiClient {
 
   getChart(id: string): Promise<ChartDTO> {
     return this.request("GET", `/api/charts/${seg(id)}`);
+  }
+
+  getChartSpec(id: string): Promise<ChartSpecDTO> {
+    return this.request("GET", `/api/chart-specs/${seg(id)}`);
   }
 
   listReports(): Promise<ReportSummaryDTO[]> {

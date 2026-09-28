@@ -73,6 +73,16 @@ export function useChart(id: string) {
   });
 }
 
+export function useChartSpec(id: string) {
+  const api = useApi();
+  return useQuery({
+    queryKey: queryKeys.chartSpec(id),
+    queryFn: () => api.getChartSpec(id),
+    enabled: id.startsWith("csp_"),
+    staleTime: Infinity,
+  });
+}
+
 export function useReports() {
   const api = useApi();
   return useQuery({ queryKey: queryKeys.reports, queryFn: () => api.listReports() });
