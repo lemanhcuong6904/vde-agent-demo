@@ -4,7 +4,9 @@ from .contracts import ChartPolicy, VisualTarget
 
 QUESTION_DEFAULTS = {
     "current_value": "kpi_card", "trend": "line", "comparison": "bar", "target_vs_peer": "bar",
-    "composition": "pie", "distribution": "histogram", "relationship": "scatter", "matrix": "heatmap", "funnel": "funnel",
+    "composition": "pie", "distribution": "histogram", "distribution_comparison": "box_plot",
+    "relationship": "scatter", "matrix": "heatmap", "geospatial": "map", "funnel": "funnel",
+    "additive_change": "waterfall", "hierarchy": "treemap", "actual_vs_target": "bullet",
 }
 
 
