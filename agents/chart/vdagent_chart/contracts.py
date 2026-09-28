@@ -71,6 +71,7 @@ class ChartSpecArtifact:
     lineage: dict[str, Any]
     validation: dict[str, Any]
     content_hash: str
+    limitations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
