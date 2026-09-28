@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# One image for backend, the five agents and the seed job (spec §12).
+# One image for the backend (with its agent plugins) and the seed job (spec §12).
 # Stage 1 builds the frontend; the backend serves /app/frontend/dist at `/`.
 
 FROM node:22-slim AS frontend
@@ -21,7 +21,7 @@ WORKDIR /app
 
 # Third-party dependencies first (cached until uv.lock / member pyproject files change).
 COPY pyproject.toml uv.lock .python-version ./
-COPY proto/pyproject.toml proto/pyproject.toml
+COPY sdk/pyproject.toml sdk/pyproject.toml
 COPY backend/pyproject.toml backend/pyproject.toml
 COPY agents/_template/pyproject.toml agents/_template/pyproject.toml
 COPY agents/orchestrator/pyproject.toml agents/orchestrator/pyproject.toml
@@ -32,19 +32,15 @@ COPY agents/report/pyproject.toml agents/report/pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-workspace
 
-COPY proto/ proto/
+COPY sdk/ sdk/
 COPY backend/ backend/
 COPY agents/ agents/
 COPY data/ data/
-# Generated gRPC stubs are gitignored: generate them here. grpcio-tools lives only in the dev group,
-# so install it (at its locked version), run codegen, then prune the dev group in the same layer.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen \
-    && python proto/scripts/gen.py \
-    && uv sync --frozen --no-dev \
-    && python -c "from vdagent_proto import agent_pb2, agent_pb2_grpc"
+    uv sync --frozen --no-dev \
+    && python -c "import vdagent_backend.app, vdagent_orchestrator, vdagent_data, vdagent_compare, vdagent_insight, vdagent_report"
 
 COPY --from=frontend /frontend/dist frontend/dist
 
-EXPOSE 8000 50050
+EXPOSE 8000
 CMD ["uvicorn", "vdagent_backend.app:app", "--host", "0.0.0.0", "--port", "8000"]

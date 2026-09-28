@@ -1,103 +1,78 @@
-"""Engine / API test harness: five fake agents that dial the in-process hub and replay scripted turns.
+"""Engine / API test harness: five fake in-process agents that replay scripted turns.
 
-Each fake agent runs a per-test `handler(session)` coroutine for every turn started on its hub
-session; the `Session` helpers send `AgentFrame`s and read `call_result`s exactly like a real agent.
+Each fake agent implements the SDK `Agent` protocol and runs a per-test `handler(session)`
+coroutine for every turn; the `Session` helpers are thin wrappers over the Backend's `ctx`, used
+exactly like a real plugin uses it.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import sqlite3
-from collections.abc import AsyncIterator, Awaitable, Callable
+import sys
+import types
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-import grpc
 import pytest
 
-from hub_client import HubClient
-from vdagent_backend.config import AgentSpec, Config
+from vdagent_backend.config import Config, PluginSpec
 from vdagent_backend.db import repo
 from vdagent_backend.db.database import create_db
-from vdagent_backend.engine import AgentHub, Engine
+from vdagent_backend.engine import Engine
 from vdagent_backend.events import EventBus
+from vdagent_backend.plugins import AgentRegistry, RegisteredAgent
 from vdagent_backend.tokens import TokenRegistry
-from vdagent_proto import agent_pb2 as pb
+from vdagent_sdk import InvocationContext, Message, PluginAPI, ToolCall
 
 ALICE, BOB = "u_000000000001", "u_000000000002"
 AGENTS = ("orchestrator", "data", "compare", "insight", "report")
 WAIT_S = 5.0
 
+Call = tuple[str, str, dict[str, Any]]
+
 
 class Session:
-    """One fake turn, seen from the agent side."""
+    """One fake turn, seen from the plugin side."""
 
-    def __init__(self, start: pb.InvokeStart, agent: FakeAgent, ref: str) -> None:
-        self.start = start
-        self.ref = ref
-        self._agent = agent
+    def __init__(self, ctx: InvocationContext) -> None:
+        self.ctx = ctx
         self._n = 0
-        self.inbox: asyncio.Queue[pb.BackendFrame] = asyncio.Queue()
 
     @property
     def inbound(self) -> str:
-        return self.start.history[-1].content
+        return self.ctx.history[-1]["content"]
 
     def _tcid(self) -> str:
         self._n += 1
-        return f"{self.start.invocation_id}_c{self._n}"
+        return f"{self.ctx.invocation_id}_c{self._n}"
 
-    async def _write(self, frame: pb.AgentFrame) -> None:
-        assert self._agent.client is not None
-        await self._agent.client.frame(self.ref, frame)
-
-    async def assistant(self, content: str = "", calls: list[tuple[str, str, dict[str, Any]]] | None = None) -> None:
-        await self._write(
-            pb.AgentFrame(
-                message=pb.Message(
-                    role=pb.ASSISTANT,
-                    tool_calls=[pb.ToolCall(id=i, name=n, arguments_json=json.dumps(a)) for i, n, a in calls or []],
-                    content=content,
-                )
-            )
-        )
+    async def assistant(self, content: str = "", calls: list[Call] | None = None) -> None:
+        await self.ctx.emit_assistant(content, [ToolCall(i, n, json.dumps(a)) for i, n, a in calls or []])
 
     async def tool(self, tool_call_id: str, content: str) -> None:
-        await self._write(pb.AgentFrame(message=pb.Message(role=pb.TOOL, content=content, tool_call_id=tool_call_id)))
+        await self.ctx.emit_tool_result(tool_call_id, content)
 
-    async def call(self, tool_call_id: str, target: str, message: str) -> None:
-        await self._write(pb.AgentFrame(call=pb.AgentCallRequest(tool_call_id=tool_call_id, target=target, message=message)))
+    async def call(self, tool_call_id: str, target: str, message: str) -> str:
+        return await self.ctx.call_agent(tool_call_id, target, message)
 
-    async def result(self) -> pb.AgentCallResult:
-        frame = await self.inbox.get()
-        assert frame.WhichOneof("kind") == "call_result", frame
-        return frame.call_result
+    async def final(self, content: str) -> None:
+        """The last assistant step (no tool calls); returning from the handler ends the turn."""
+        await self.assistant(content)
 
-    async def final(self, content: str, *, with_message: bool = True) -> None:
-        """End the turn like a real agent: the last assistant message (no tool calls), then `final`."""
-        if with_message:
-            await self.assistant(content)
-        await self._write(pb.AgentFrame(final=pb.Final(content=content)))
-
-    async def fail(self, code: str, detail: str) -> None:
-        """End the turn with a `failure`, like the host after a brain error."""
-        assert self._agent.client is not None
-        await self._agent.client.send(self.ref, failure=pb.Failure(code=code, detail=detail))
-
-    def send_to(self, target: str, message: str) -> tuple[str, str, dict[str, Any]]:
+    def send_to(self, target: str, message: str) -> Call:
         return (self._tcid(), "send_to_agent", {"agent": target, "message": message})
 
-    async def ask(self, target: str, message: str) -> pb.AgentCallResult:
-        """One full send_to_agent step: assistant(tool_call) → call → call_result → tool message."""
+    async def ask(self, target: str, message: str) -> str:
+        """One full send_to_agent step: assistant(tool_call) → call_agent → tool result."""
         tc = self.send_to(target, message)
         await self.assistant(calls=[tc])
-        await self.call(tc[0], target, message)
-        res = await self.result()
-        await self.tool(tc[0], res.content)
-        return res
+        reply = await self.call(tc[0], target, message)
+        await self.tool(tc[0], reply)
+        return reply
 
 
 Handler = Callable[[Session], Awaitable[None]]
@@ -109,83 +84,47 @@ async def _echo(session: Session) -> None:
 
 @dataclass
 class FakeAgent:
-    """A hub client that runs `handler` for every turn and answers compactions."""
+    """An in-process `Agent` that runs `handler` for every turn and answers compactions."""
 
     name: str
     handler: Handler = _echo
-    starts: list[pb.InvokeStart] = field(default_factory=list)
-    compacts: list[pb.CompactRequest] = field(default_factory=list)
-    compact_fails: bool = False
-    cancelled: list[str] = field(default_factory=list)  # refs the hub cancelled
-    client: HubClient | None = None
-    hub: AgentHub | None = None
-    _sessions: dict[str, Session] = field(default_factory=dict)
-    _tasks: set[asyncio.Task[None]] = field(default_factory=set)
-    _turn_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    starts: list[InvocationContext] = field(default_factory=list)
+    compacts: list[tuple[str, list[Message]]] = field(default_factory=list)
+    compact_mode: Literal["ok", "raise", "hang"] = "ok"
+    cancelled: list[str] = field(default_factory=list)  # invocation ids whose invoke saw CancelledError
 
-    async def connect(self, hub: AgentHub) -> None:
-        assert hub.port is not None
-        self.hub, self.client = hub, HubClient(hub.port)
-        welcome = await self.client.hello(self.name)
-        assert welcome.WhichOneof("kind") == "welcome", welcome
-        self._spawn(self._loop())
-
-    async def disconnect(self) -> None:
-        """Drop the session like a crashed agent; returns once the hub sees the agent unhealthy."""
-        for task in list(self._tasks):
-            task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
-        if self.client is not None:
-            await self.client.close()
-            self.client = None
-        if self.hub is not None:
-            hub = self.hub
-            await wait_for(lambda: _true(not hub.is_healthy(self.name)))
-
-    def _spawn(self, coro: Awaitable[None]) -> asyncio.Task[None]:
-        task = asyncio.ensure_future(coro)
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        return task
-
-    async def _loop(self) -> None:
-        assert self.client is not None
-        with contextlib.suppress(grpc.aio.AioRpcError):
-            while (msg := await self.client.call.read()) is not grpc.aio.EOF:
-                kind, ref = msg.WhichOneof("kind"), msg.ref
-                if kind == "frame" and msg.frame.WhichOneof("kind") == "start":
-                    self.starts.append(msg.frame.start)
-                    session = self._sessions[ref] = Session(msg.frame.start, self, ref)
-                    self._turn_tasks[ref] = self._spawn(self._turn(session))
-                elif kind == "frame" and ref in self._sessions:
-                    self._sessions[ref].inbox.put_nowait(msg.frame)
-                elif kind == "cancel":
-                    self.cancelled.append(ref)
-                    task = self._turn_tasks.get(ref)
-                    if task is not None:
-                        task.cancel()
-                elif kind == "compact":
-                    self._spawn(self._compact(ref, msg.compact))
-
-    async def _turn(self, session: Session) -> None:
+    async def invoke(self, ctx: InvocationContext) -> None:
+        self.starts.append(ctx)
         try:
-            await self.handler(session)
+            await self.handler(Session(ctx))
         except asyncio.CancelledError:
+            self.cancelled.append(ctx.invocation_id)
             raise
-        except Exception as e:  # a broken script fails its turn, like a crashing brain
-            await session.fail("INTERNAL", repr(e))
 
-    async def _compact(self, ref: str, request: pb.CompactRequest) -> None:
-        assert self.client is not None
-        self.compacts.append(request)
-        if self.compact_fails:
-            await self.client.send(ref, failure=pb.Failure(code="INTERNAL", detail="summariser down"))
-        else:
-            await self.client.send(ref, compacted=pb.CompactResponse(summary=f"SUMMARY#{len(self.compacts)}"))
+    async def compact(self, previous_summary: str, messages: list[Message]) -> str:
+        self.compacts.append((previous_summary, messages))
+        if self.compact_mode == "raise":
+            raise RuntimeError("summariser down")
+        if self.compact_mode == "hang":
+            await asyncio.Event().wait()
+        return f"SUMMARY#{len(self.compacts)}"
 
 
-async def _true(value: bool) -> bool:
-    return value
+def registry_of(agents: Mapping[str, FakeAgent]) -> AgentRegistry:
+    return AgentRegistry(RegisteredAgent(n, f"{n} agent", a, "tests") for n, a in agents.items())
+
+
+def install_plugin(monkeypatch: pytest.MonkeyPatch, module: str, agents: Mapping[str, FakeAgent]) -> PluginSpec:
+    """Make `module` importable as a plugin whose `setup` registers `agents`; returns its spec."""
+
+    def setup(api: PluginAPI, opts: Mapping[str, Any]) -> None:
+        for name, agent in agents.items():
+            api.register_agent(name=name, description=f"{name} agent", agent=agent)
+
+    plugin = types.ModuleType(module)
+    plugin.setup = setup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, module, plugin)
+    return PluginSpec(module)
 
 
 @dataclass
@@ -194,7 +133,7 @@ class Harness:
     db: Any
     bus: EventBus
     tokens: TokenRegistry
-    hub: AgentHub
+    registry: AgentRegistry
     engine: Engine
     agents: dict[str, FakeAgent]
 
@@ -244,32 +183,21 @@ def seed_users(path: str) -> None:
     conn.close()
 
 
-async def connect_all(agents: dict[str, FakeAgent], hub: AgentHub) -> None:
-    for agent in agents.values():
-        await agent.connect(hub)
-
-
-def make_config(tmp_path: Path, agents: dict[str, FakeAgent], **overrides: Any) -> Config:
+def make_config(tmp_path: Path, **overrides: Any) -> Config:
     cfg = Config(
         backend_db=str(tmp_path / "backend.db"),
         warehouse_db=str(tmp_path / "warehouse.db"),
         mcp_public_url="http://mcp.test/mcp",
         frontend_dist=str(tmp_path / "no-dist"),
-        agent_listen="127.0.0.1:0",
         max_depth=4,
         max_steps=12,
-        agents={n: AgentSpec(n, f"{n} agent") for n in agents},
     )
     return replace(cfg, **overrides)
 
 
 @pytest.fixture
-async def fake_agents() -> AsyncIterator[dict[str, FakeAgent]]:
-    agents = {name: FakeAgent(name) for name in AGENTS}
-    yield agents
-    for agent in agents.values():
-        agent.hub = None  # the hub may already be closed: do not wait for it
-        await agent.disconnect()
+def fake_agents() -> dict[str, FakeAgent]:
+    return {name: FakeAgent(name) for name in AGENTS}
 
 
 @pytest.fixture
@@ -279,14 +207,13 @@ def cfg_overrides() -> dict[str, Any]:
 
 @pytest.fixture
 async def harness(tmp_path: Path, fake_agents: dict[str, FakeAgent], cfg_overrides: dict[str, Any]) -> AsyncIterator[Harness]:
-    cfg = make_config(tmp_path, fake_agents, **cfg_overrides)
+    cfg = make_config(tmp_path, **cfg_overrides)
     db = create_db(cfg.backend_db)
     seed_users(cfg.backend_db)
     bus, tokens = EventBus(), TokenRegistry()
-    hub = AgentHub(cfg.agents)
-    engine = Engine(cfg, db, bus, tokens, hub)
+    registry = registry_of(fake_agents)
+    engine = Engine(cfg, db, bus, tokens, registry)
     await engine.start()
-    await connect_all(fake_agents, hub)
-    yield Harness(cfg, db, bus, tokens, hub, engine, fake_agents)
+    yield Harness(cfg, db, bus, tokens, registry, engine, fake_agents)
     await engine.stop()
     await db.dispose()

@@ -103,12 +103,6 @@ function upsertById<T extends { id: string }>(list: T[], item: T, insert: "appen
   return next;
 }
 
-/** Health broadcasts may omit per-user fields; only patch what the event carries. */
 function patchAgent(agent: AgentDTO, status: AgentStatusData): AgentDTO {
-  return {
-    ...agent,
-    healthy: status.healthy ?? agent.healthy,
-    busy: status.busy ?? agent.busy,
-    queue_len: status.queue_len ?? agent.queue_len,
-  };
+  return { ...agent, busy: status.busy, queue_len: status.queue_len };
 }

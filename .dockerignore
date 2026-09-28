@@ -10,5 +10,3 @@ frontend/dist
 **/*.pyc
 .pytest_cache
 **/.pytest_cache
-proto/vdagent_proto/agent_pb2*.py
-proto/vdagent_proto/agent_pb2*.pyi

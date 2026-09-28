@@ -1,90 +1,84 @@
-# Agent template
+# Agent plugin template
 
-Copy this folder to build a vdagent agent. The template owns the gRPC side of the
-Backend↔agent protocol; you write the **brain** with whatever you like — plain code, LiteLLM,
-LangChain/LangGraph, the OpenAI Agents SDK.
+Copy this folder to build a vdagent agent **plugin**. The Backend imports your package at startup
+(it is listed under `plugins:` in `backend/config.yaml`), calls its `setup(api, opts)`, and runs
+your agent's turns in its own process and event loop. You write the **brain** with whatever you
+like — plain code, LiteLLM, LangChain/LangGraph, the OpenAI Agents SDK. The only contract is the
+interface in `vdagent_sdk` (`sdk/vdagent_sdk/__init__.py`; its docstring is the reference).
 
-An agent dials the Backend: it opens one long-lived session to the Backend's agent hub
-(`VDAGENT_BACKEND`, default `localhost:50050`), identifies itself by `NAME`, and serves every turn
-and compaction the Backend sends over it. It needs no listening port, so it can run on any machine
-that reaches the Backend. There is no credential (demo): the Backend accepts any name listed in
-`backend/config.yaml`.
+Design: [`docs/superpowers/specs/2026-09-26-agent-plugins-design.md`](../../docs/superpowers/specs/2026-09-26-agent-plugins-design.md).
 
-Design: [`docs/superpowers/specs/2026-09-24-agent-template-design.md`](../../docs/superpowers/specs/2026-09-24-agent-template-design.md),
-amended by [`2026-09-24-agent-connect-direction-design.md`](../../docs/superpowers/specs/2026-09-24-agent-connect-direction-design.md).
-
-## What an agent is
+## What a plugin is
 
 ```
 agents/<name>/
 ├── README.md
-├── pyproject.toml              # "vdagent-<name>"; template deps + whatever the brain needs
+├── pyproject.toml              # "vdagent-<name>"; depends on vdagent-sdk + whatever the brain needs
+├── .env.example                # settings your plugin reads (copy to .env, gitignored)
 └── vdagent_<name>/
-    ├── __main__.py             ┐
-    ├── contract.py             ├ host: copied from _template, never edited
-    ├── host.py                 ┘
-    ├── agent.py                ← brain: NAME, build_agent(), your Agent
+    ├── __init__.py             ← setup(api, opts): read config, build and register your agent(s)
+    ├── agent.py                ← brain: your Agent
     ├── …                       ← anything else the brain needs (llm.py, prompts/, …)
-    └── tests/
-        ├── test_host.py        ← copied, never edited (catches a drifted host copy)
-        └── test_agent.py       ← your tests
+    └── tests/test_agent.py     ← your tests
 ```
 
-The **host** keeps the hub session open (reconnecting with backoff), runs turns concurrently,
-routes agent-to-agent call replies, checks the turn rules, and reports failures. It is identical
-in every agent; to change it, change `_template` and re-copy into every agent folder.
-
-The **Backend** owns everything shared: the agent registry (`backend/config.yaml`), MCP tool
-permissions, routing and deadlock checks for agent calls, and every agent's message history. An
+The **Backend** owns everything shared: loading plugins, the agent registry, MCP tool permissions,
+routing and deadlock checks for agent calls, the turn rules, and every agent's message history. An
 agent keeps no state between turns.
 
-## Create an agent
+## Create a plugin
 
 1. `cp -R agents/_template agents/<name>` and rename `agent_template/` → `vdagent_<name>/`.
 2. In `agents/<name>/pyproject.toml`: set `name = "vdagent-<name>"`, `packages = ["vdagent_<name>"]`,
    and add the brain's dependencies.
-3. In `agent.py`: set `NAME = "<name>"`, implement your agent, return it from `build_agent()`.
+3. Implement your agent in `agent.py` and register it from `setup()` in `__init__.py`
+   (`api.register_agent(name="<name>", description="…", agent=...)`; peers see the description).
    Replace `tests/test_agent.py` with tests for it.
 4. Root `pyproject.toml`: add `agents/<name>` to `[tool.uv.workspace].members` and
    `[tool.basedpyright].extraPaths`, `vdagent-<name>` to `dependencies`, and
    `vdagent-<name> = { workspace = true }` to `[tool.uv.sources]`. Run `uv sync`.
 5. `Dockerfile.python`: add `COPY agents/<name>/pyproject.toml agents/<name>/pyproject.toml`
-   next to the others.
-6. Register it with the Backend: an `agents:` entry (one-line description, which peers see) in
-   `backend/config.yaml` and `backend/config.compose.yaml`, a service in `docker-compose.yml`
-   (`<<: *agent`, `command: ["python", "-m", "vdagent_<name>"]`), and `<name>` in `AGENTS` in the
-   root `Makefile`.
-7. `cp agents/<name>/.env.example agents/<name>/.env` (the copy of `_template` brought the example
-   along), add the settings your brain reads (e.g. the LLM endpoint) to both files, and fill in
-   `.env`. In `docker-compose.yml`, give the service `env_file: agents/<name>/.env`.
-8. Grant MCP tools in `backend/vdagent_backend/mcp/tools.py` (`ALL_AGENTS` and `PERMISSIONS`).
-9. `uv run pytest agents/<name>`, then `make agent-<name>`.
+   next to the others; `docker-compose.yml`: mount `./agents/<name>/.env` read-only into the
+   backend service like the others.
+6. List `- module: vdagent_<name>` under `plugins:` in `backend/config.yaml` and
+   `backend/config.compose.yaml`.
+7. `cp agents/<name>/.env.example agents/<name>/.env`, add the settings your brain reads to both
+   files, and fill in `.env`.
+8. Grant MCP tools in `backend/vdagent_backend/mcp/tools.py` (`ALL_AGENTS` and `PERMISSIONS`);
+   an agent name not listed there sees no MCP tools.
+9. `uv run pytest agents/<name>`, then `make backend`: the log shows
+   `plugin vdagent_<name> loaded: <name>`.
 
 ## Configuration
 
-Each agent is configured by its own `agents/<name>/.env` (gitignored; it never enters Docker
-images). Precedence, highest first: `agents/<name>/.env`, the process environment, the nearest
-`.env` above the agent folder (optional; only fills variables still unset).
-`make agent-<name>` runs the agent from its folder (`cd agents/<name> && uv run python -m vdagent_<name>`).
+Plugins share the Backend's process, so **never write `os.environ`** (rule R11): read your own
+`agents/<name>/.env` with `dotenv.dotenv_values()` inside `setup()` and pass the values to your
+agent. The LiteLLM agents overlay the file on the process environment (`settings.read_env()`), so
+the file wins. Raise `vdagent_sdk.PluginConfigError` for a missing or bad setting: the Backend logs
+`plugin vdagent_<name> failed: <message>` and starts without your agent.
 
-| Variable | |
-|---|---|
-| `VDAGENT_BACKEND` | Hub address `host:port`, default `localhost:50050`. If the Backend does not list this agent's name, the session is refused and the process exits 2. |
-
-Losing the session (Backend restart, network) cancels the in-flight turns — your brain sees
-`asyncio.CancelledError` — and the host reconnects (0.5 s doubling to 10 s, ±20 % jitter).
+`opts` is the free-form mapping from the plugin's `config.yaml` entry (`opts: {...}`); the Backend
+never interprets it. The echo template uses `opts["name"]` as its agent name (default `echo`).
 
 ## The contract
 
-`contract.py` holds the types; its docstrings are the reference.
-
 ```python
+def setup(api: PluginAPI, opts: Mapping[str, Any]) -> None: ...   # or async def
+
+class PluginAPI(Protocol):
+    plugin: str                      # your module name
+    log: logging.Logger              # "vdagent.plugin.<module>"
+    def register_agent(self, *, name: str, description: str, agent: Agent) -> None: ...
+    def on_shutdown(self, fn: Callable[[], Awaitable[None]]) -> None: ...
+
 class Agent(Protocol):
     async def invoke(self, ctx: InvocationContext) -> None: ...
     async def compact(self, previous_summary: str, messages: list[Message]) -> str: ...
-
-def build_agent() -> Agent: ...          # in agent.py; raise AgentConfigError for bad settings
 ```
+
+Registrations are all-or-nothing per plugin: if `setup` raises, nothing it registered is kept.
+`register_agent` raises `ValueError` for an empty name or description or a name another plugin
+already took. `api` is only valid while `setup` runs.
 
 `ctx` (one per turn) gives you:
 
@@ -93,10 +87,10 @@ def build_agent() -> Agent: ...          # in agent.py; raise AgentConfigError f
 | `invocation_id`, `task_id`, `user_id` | Ids of this turn. |
 | `summary` | Rolling summary of this user's earlier tasks (`""` if none). Put it in your system prompt. |
 | `history` | Uncompacted messages as OpenAI chat dicts; the last one is the inbound `[from: <sender>] …` message. |
-| `peers` | Every other agent (`name`, `description`). |
+| `peers` | Every other registered agent (`name`, `description`). |
 | `mcp` | `url` + `token` of the Backend's MCP server (streamable HTTP, `Authorization: Bearer <token>`). |
 | `max_steps` | Budget of LLM calls for this turn. |
-| `await emit_assistant(content, tool_calls=())` | Record one assistant step. |
+| `await emit_assistant(content, tool_calls=())` | Record one assistant step (persisted and shown in the UI before it returns). |
 | `await emit_tool_result(tool_call_id, content)` | Record one tool result. |
 | `await call_agent(tool_call_id, target, message) -> str` | Ask another agent for a `send_to_agent` tool call; returns its reply or `error: …`. |
 
@@ -104,24 +98,21 @@ A turn, step by step:
 
 ```mermaid
 sequenceDiagram
-  participant BE as Backend
-  participant H as host.py
+  participant BE as Backend engine
   participant A as your agent
-  BE->>H: frame{start} on the session
-  H->>A: await invoke(ctx)
-  A->>H: emit_assistant("", [send_to_agent#c1])
-  A->>H: call_agent("c1", "data", "…")
-  H->>BE: call → … ← call_result
-  H-->>A: reply
-  A->>H: emit_tool_result("c1", reply)
-  A->>H: emit_assistant("final answer")
-  A-->>H: return
-  H->>BE: final("final answer")
+  BE->>A: await invoke(ctx)
+  A->>BE: emit_assistant("", [send_to_agent#c1])
+  A->>BE: call_agent("c1", "data", "…")
+  Note over BE: runs data's turn
+  BE-->>A: reply
+  A->>BE: emit_tool_result("c1", reply)
+  A->>BE: emit_assistant("final answer")
+  A-->>BE: return → "final answer" is the answer
 ```
 
 ### Rules
 
-| # | Rule | Checked by host |
+| # | Rule | Checked by the Backend |
 |---|---|:-:|
 | R1 | No memory between turns: `summary` + `history` is the whole truth. | |
 | R2 | Emit an assistant step (with its tool calls) before any result or `call_agent` for them. A new step only once every call of the previous step has a result. Tool-call ids non-empty and unique in a step. | ✓ |
@@ -131,18 +122,20 @@ sequenceDiagram
 | R6 | Tool failures become result content `error: …`; the turn continues. Model timeout → raise `AgentTimeoutError` (reported as `DEADLINE_EXCEEDED`). Anything else raised fails the turn (`INTERNAL`). | mapping ✓ |
 | R7 | At most `ctx.max_steps` LLM calls. | |
 | R8 | One agent object serves concurrent turns: keep per-turn state off `self`. | |
-| R9 | Never swallow `asyncio.CancelledError` (task cancel from the Backend, or a lost session). | |
+| R9 | Never swallow `asyncio.CancelledError` (the user cancelled the task, or the Backend is stopping). | |
+| R10 | Never block the event loop — it is the Backend's. Use `asyncio.to_thread` for blocking work. | |
+| R11 | Never write `os.environ` or other process-global state. | |
 
 A broken rule raises `ContractViolation` at the offending call and fails the turn with
-`INTERNAL: contract violation: …`, even if you catch it.
+`contract violation: …`, even if you catch it. After the turn every `ctx` method raises.
 
 ## Tools
 
 | Kind | Executed by | Access controlled by | Report it with |
 |---|---|---|---|
 | MCP tool (`run_query`, `create_chart`, …) | Backend `/mcp` via `ctx.mcp` | Backend `PERMISSIONS` | `emit_assistant` → `emit_tool_result` |
-| `send_to_agent` (name is fixed: `contract.SEND_TO_AGENT`) | Backend routes to the peer | Backend call checks (depth, deadlock, health) | `emit_assistant` → `call_agent` → `emit_tool_result` |
-| Local tool | Your process | You | `emit_assistant` → `emit_tool_result` |
+| `send_to_agent` (name is fixed: `vdagent_sdk.SEND_TO_AGENT`) | Backend routes to the peer | Backend call checks (unknown, self, depth, deadlock) | `emit_assistant` → `call_agent` → `emit_tool_result` |
+| Local tool | Your plugin | You | `emit_assistant` → `emit_tool_result` |
 
 Local tools are fine, with these rules:
 
@@ -159,7 +152,7 @@ Local tools are fine, with these rules:
 ## Recipes
 
 > **Unexecuted sketches.** They show where each framework plugs into the contract; check them
-> against the framework's current docs and let `test_host.py`-style tests prove your version.
+> against the framework's current docs and let tests that drive `invoke` with a recording `ctx` prove your version.
 
 ### LangChain v1 / LangGraph (`create_agent`)
 
@@ -178,7 +171,7 @@ from langchain_core.tools import InjectedToolCallId, tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 
-from .contract import SEND_TO_AGENT, AgentTimeoutError, InvocationContext, Message, ToolCall
+from vdagent_sdk import SEND_TO_AGENT, AgentTimeoutError, InvocationContext, Message, ToolCall
 
 
 class EmitToContext(AgentMiddleware):
@@ -246,7 +239,7 @@ from agents import Agent as SdkAgent, RunHooks, Runner, function_tool
 from agents.mcp import MCPServerStreamableHttp
 from agents.tool_context import ToolContext
 
-from .contract import InvocationContext, ToolCall
+from vdagent_sdk import InvocationContext, ToolCall
 
 
 class EmitHooks(RunHooks):
@@ -307,21 +300,9 @@ one (R5). Map the SDK's timeout exception to `AgentTimeoutError`.
 
 ## Testing
 
-`tests/test_host.py` runs the real host against a fake in-process Backend hub over gRPC; it exports
-helpers for your own tests (a turn failure surfaces as `grpc.aio.AioRpcError` with its code):
-
-```python
-from .test_host import agent_stub, kinds, read_all, read_frame, start_frame
-
-async def test_answers():
-    async with agent_stub(MyAgent(llm=FakeLLM(...))) as stub:
-        call = stub.Invoke()
-        await call.write(start_frame())               # history: "[from: user] revenue by region?"
-        frames = await read_all(call)
-    assert kinds(frames) == ["message:assistant", "final"]
-```
-
-Answer agent calls by writing `agent_pb2.BackendFrame(call_result=...)` after reading the `call`
-frame (see `test_concurrent_agent_calls_each_get_their_own_reply`). Inject fakes for anything
-external (LLM, MCP) through your agent's constructor, and keep `build_agent()` the only place that
-reads the environment. See `agents/orchestrator/` for a complete example.
+Test the brain without the Backend: call `invoke` with a small recording `ctx` (any object with the
+`InvocationContext` fields and methods) and assert the steps it emitted; test `setup` with a fake
+`PluginAPI` that records `register_agent`. `tests/test_agent.py` here shows both;
+`agents/data/vdagent_data/tests/test_agent.py` is a complete example with a scripted LLM, a fake
+MCP session and concurrent `call_agent` replies. Inject fakes for anything external (LLM, MCP)
+through your agent's constructor, and keep `setup()` the only place that reads configuration.

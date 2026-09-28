@@ -1,16 +1,15 @@
-# docker-compose variant of config.yaml: the hub listens on all interfaces so agent containers can dial
-# `backend:50050`, and agents reach MCP through the `backend` service. Relative paths resolve from the
-# container working dir (/app).
+# docker-compose variant of config.yaml. Agents run inside the backend container as plugins, so
+# their MCP clients reach this Backend on localhost. Relative paths resolve from the container
+# working dir (/app).
 backend_db: ./var/backend.db
 warehouse_db: ./var/warehouse.db
-mcp_public_url: http://backend:8000/mcp        # URL agents use to reach MCP
-agent_listen: 0.0.0.0:50050                     # hub address (exposed to the compose network only)
+mcp_public_url: http://localhost:8000/mcp       # URL plugins' MCP clients use
 frontend_dist: ./frontend/dist                  # served at / if present
 max_depth: 4
 max_steps: 12
-agents:
-  orchestrator: {description: "Talks to the user, plans, delegates, writes final answers."}
-  data:         {description: "Queries the warehouse; returns dataset ids."}
-  compare:      {description: "Compares datasets, periods and segments."}
-  insight:      {description: "Explains trends, anomalies and drivers."}
-  report:       {description: "Builds formatted reports with charts."}
+plugins:
+  - module: vdagent_orchestrator
+  - module: vdagent_data
+  - module: vdagent_compare
+  - module: vdagent_insight
+  - module: vdagent_report

@@ -1,20 +1,16 @@
 """This agent's brain. EDIT THIS FILE (and add any modules it needs).
 
-Implement `Agent` (see `contract.py` for the types and rules R1–R9) with any framework, and return
-it from `build_agent()`. The host calls `build_agent()` once at startup, after loading `.env`:
-read configuration and construct clients there, and raise `AgentConfigError` for bad settings.
+Implement `vdagent_sdk.Agent` (see the SDK's docstring for the types and rules R1–R11) with any
+framework, and register it from `setup()` in `__init__.py`.
 
 This stub echoes the inbound message and keeps a naive summary; it needs no LLM.
 """
 
 from __future__ import annotations
 
-from .contract import Agent, InvocationContext, Message
+from vdagent_sdk import InvocationContext, Message
 
-NAME = "echo"
-"""The name this agent connects to the Backend as: an `agents:` entry in `backend/config.yaml`.
-Also used in logs and startup errors."""
-
+DESCRIPTION = "Echoes the inbound message."
 SUMMARY_MAX_CHARS = 2000
 
 
@@ -26,7 +22,3 @@ class EchoAgent:
         lines = [previous_summary] if previous_summary else []
         lines += [m["content"] for m in messages if m["role"] == "user"]
         return "\n".join(lines)[-SUMMARY_MAX_CHARS:]
-
-
-def build_agent() -> Agent:
-    return EchoAgent()

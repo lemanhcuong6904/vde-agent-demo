@@ -4,15 +4,19 @@
 - The Backend's `.env` is loaded first: the nearest `.env` walking up from the config file — so
   `backend/.env` for the default config — else one found from the working directory. The process
   environment wins over it.
-- Scalar keys can be overridden by `VDAGENT_<KEY>` (e.g. `VDAGENT_BACKEND_DB`, `VDAGENT_AGENT_LISTEN`).
+- Scalar keys can be overridden by `VDAGENT_<KEY>` (e.g. `VDAGENT_BACKEND_DB`, `VDAGENT_MAX_STEPS`).
 - Relative paths are resolved against the current working directory.
+- `plugins:` is the ordered list of agent plugins (plugins spec §4.1); unknown top-level keys are
+  ignored, malformed plugin entries are a `ValueError` naming the entry.
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 from dotenv import find_dotenv, load_dotenv
@@ -21,9 +25,12 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 
 
 @dataclass(frozen=True)
-class AgentSpec:
-    name: str
-    description: str
+class PluginSpec:
+    """One `plugins:` entry: the module to import, the dict handed to its `setup`, and a toggle."""
+
+    module: str
+    opts: Mapping[str, Any] = field(default_factory=dict)
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -32,25 +39,21 @@ class Config:
     warehouse_db: str
     mcp_public_url: str
     frontend_dist: str
-    agent_listen: str = "127.0.0.1:50050"
     max_depth: int = 4
     max_steps: int = 12
-    agents: dict[str, AgentSpec] = field(default_factory=dict)
-
-    @property
-    def agent_names(self) -> list[str]:
-        return list(self.agents)
+    plugins: list[PluginSpec] = field(default_factory=list)
 
 
 _SCALARS: dict[str, type] = {
     "backend_db": str,
     "warehouse_db": str,
     "mcp_public_url": str,
-    "agent_listen": str,
     "frontend_dist": str,
     "max_depth": int,
     "max_steps": int,
 }
+
+_PLUGIN_KEYS = frozenset({"module", "opts", "enabled"})
 
 
 def _load_env_file(cfg_path: Path) -> None:
@@ -74,8 +77,32 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         value = env if env is not None else raw.get(key)
         if value is not None:
             values[key] = typ(value)
-    agents = {
-        name: AgentSpec(name=name, description=str((spec or {}).get("description", "")))
-        for name, spec in (raw.get("agents") or {}).items()
-    }
-    return Config(agents=agents, **values)  # type: ignore[arg-type]
+    return Config(plugins=_parse_plugins(raw.get("plugins")), **values)  # type: ignore[arg-type]
+
+
+def _parse_plugins(raw: object) -> list[PluginSpec]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("plugins must be a list of {module, opts, enabled} entries")
+    specs: list[PluginSpec] = []
+    for i, entry in enumerate(raw):  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+        where = f"plugins[{i}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{where} must be a mapping with a `module` key")
+        unknown = sorted(str(k) for k in entry if k not in _PLUGIN_KEYS)  # pyright: ignore[reportUnknownVariableType]
+        if unknown:
+            raise ValueError(f"{where} has unknown keys: {', '.join(unknown)}")
+        module = entry.get("module")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        if not isinstance(module, str) or not module.strip():
+            raise ValueError(f"{where}.module must be a non-empty string")
+        opts = entry.get("opts", {})  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        if opts is None:
+            opts = {}
+        if not isinstance(opts, dict):
+            raise ValueError(f"{where}.opts must be a mapping")
+        enabled = entry.get("enabled", True)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        if not isinstance(enabled, bool):
+            raise ValueError(f"{where}.enabled must be true or false")
+        specs.append(PluginSpec(module=module.strip(), opts=dict(opts), enabled=enabled))  # pyright: ignore[reportUnknownArgumentType]
+    return specs

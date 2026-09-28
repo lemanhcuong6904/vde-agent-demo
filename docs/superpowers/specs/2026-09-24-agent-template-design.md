@@ -5,6 +5,15 @@ Amends: `2026-09-24-vdagent-design.md` (§2.1 Agents, §2.3 layout, §7 Agent se
 Amended by: `2026-09-24-agent-connect-direction-design.md` (the host dials the Backend's hub; T7, T9,
 §3, §4, §9, §10 below reflect it).
 
+> **Amended by `2026-09-26-agent-plugins-design.md`.** The template is now a Backend *plugin*:
+> `agent_template/__init__.py` exports `setup(api, opts)` and registers an `Agent` from
+> `vdagent_sdk`. The host (`host.py`), `contract.py` (now the `vdagent_sdk` package),
+> `__main__.py`, `tests/test_host.py`, `NAME`, `build_agent()` and every gRPC, hub, reconnect and
+> process-exit rule below are removed. The turn rules R1–R9 are unchanged (plus R10–R11) and are
+> enforced by the Backend's `InvocationContext`; a violation fails the turn with
+> `contract violation: …`. Plugins read their own `.env` with `dotenv_values()` and raise
+> `PluginConfigError` for bad settings. `agents/_template/README.md` describes the current design.
+
 ## 1. Purpose and scope
 
 Replace the single shared agent runtime (`agents/vdagent_agents/`, one package run five times with

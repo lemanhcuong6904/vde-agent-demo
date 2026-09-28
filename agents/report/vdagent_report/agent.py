@@ -10,24 +10,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from .contract import (
-    SEND_TO_AGENT,
-    Agent,
-    AgentTimeoutError,
-    InvocationContext,
-    Message,
-    Peer,
-    ToolCall,
-)
+from vdagent_sdk import SEND_TO_AGENT, Agent, AgentTimeoutError, InvocationContext, Message, Peer, ToolCall
+
 from .llm import AssistantMessage, LiteLLMClient, LLMClient, LLMTimeoutError, ToolChoice
 from .mcp_client import McpSession, McpSessionFactory, open_mcp_session, openai_tool_schema, run_mcp_tool
 from .settings import load_settings
 
 NAME = "report"
+DESCRIPTION = "Builds formatted reports with charts."
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 SUMMARY_HEADING = "## Summary of earlier work with this user"
@@ -197,8 +191,9 @@ class _Turn:
         return f"error: unknown tool '{tc.name}'"
 
 
-def build_agent() -> Agent:
-    settings = load_settings()
+def build_agent(env: Mapping[str, str]) -> Agent:
+    """Raises `PluginConfigError` naming the missing or invalid setting."""
+    settings = load_settings(env)
     for noisy in ("httpx", "httpx2", "LiteLLM"):  # per-request INFO lines drown out agent logs
         logging.getLogger(noisy).setLevel(logging.WARNING)
     llm = LiteLLMClient(

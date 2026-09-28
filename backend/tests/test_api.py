@@ -1,4 +1,4 @@
-"""REST API (§10) through the real app, with fake agents behind the engine."""
+"""REST API (§10) through the real app, with fake agents loaded as a plugin."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from conftest import ALICE, BOB, FakeAgent, Session, connect_all, make_config, seed_users, wait_for
+from conftest import ALICE, BOB, FakeAgent, Session, install_plugin, make_config, seed_users, wait_for
 from vdagent_backend.app import create_app
 from vdagent_backend.db import artifacts
 from vdagent_backend.db.database import apply_schema
@@ -19,8 +19,11 @@ B = {"X-User-Id": BOB}
 
 
 @pytest.fixture
-async def client(tmp_path: Path, fake_agents: dict[str, FakeAgent]) -> AsyncIterator[httpx.AsyncClient]:
-    cfg = make_config(tmp_path, fake_agents)
+async def client(
+    tmp_path: Path, fake_agents: dict[str, FakeAgent], monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[httpx.AsyncClient]:
+    spec = install_plugin(monkeypatch, "fake_agents_plugin", fake_agents)
+    cfg = make_config(tmp_path, plugins=[spec])
     apply_schema(cfg.backend_db)
     seed_users(cfg.backend_db)
     app = create_app(cfg)
@@ -34,7 +37,6 @@ async def client(tmp_path: Path, fake_agents: dict[str, FakeAgent]) -> AsyncIter
 
     runner = asyncio.create_task(run_lifespan())
     await asyncio.wait_for(ready.wait(), 10)
-    await connect_all(fake_agents, app.state.services.engine.hub)
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -121,17 +123,19 @@ async def test_pending_lists_queued_inbound_messages(client: httpx.AsyncClient, 
         await wait_for(lambda t=t: _task_status(client, t["task_id"]))
 
 
-async def test_post_message_errors(client: httpx.AsyncClient, fake_agents: dict[str, FakeAgent]) -> None:
+async def test_agents_come_from_loaded_plugins(client: httpx.AsyncClient) -> None:
+    agents = (await client.get("/api/agents", headers=A)).json()
+    assert [a["name"] for a in agents] == ["orchestrator", "data", "compare", "insight", "report"]
+    assert agents[1] == {"name": "data", "description": "data agent", "busy": False, "queue_len": 0}
+    r = await client.get("/api/agents/nobody/messages", headers=A)
+    assert (r.status_code, r.json()["error"]["code"]) == (404, "unknown_agent")
+
+
+async def test_post_message_errors(client: httpx.AsyncClient) -> None:
     r = await client.post("/api/agents/nobody/messages", json={"content": "x"}, headers=A)
     assert (r.status_code, r.json()["error"]["code"]) == (404, "unknown_agent")
     r = await client.post("/api/agents/data/messages", json={"content": "  "}, headers=A)
     assert r.status_code == 422
-
-    await fake_agents["report"].disconnect()
-    r = await client.post("/api/agents/report/messages", json={"content": "x"}, headers=A)
-    assert (r.status_code, r.json()["error"]["code"]) == (503, "agent_unavailable")
-    agents = {a["name"]: a["healthy"] for a in (await client.get("/api/agents", headers=A)).json()}
-    assert agents["report"] is False and agents["data"] is True
 
 
 async def test_artifacts_are_owner_scoped_and_dataset_rows_page(client: httpx.AsyncClient) -> None:

@@ -1,16 +1,15 @@
 [project]
 name = "vdagent-agent-template"
 version = "0.1.0"
-description = "vdagent agent template: copy this folder to build an agent (see README.md)"
+description = "vdagent agent plugin template: copy this folder to build an agent plugin (see README.md)"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-  "vdagent-proto",
-  "grpcio>=1.66",
+  "vdagent-sdk",
   "python-dotenv>=1.0",
 ]
 
 [tool.uv.sources]
-vdagent-proto = { workspace = true }
+vdagent-sdk = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

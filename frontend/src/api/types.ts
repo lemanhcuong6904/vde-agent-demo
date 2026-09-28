@@ -65,7 +65,6 @@ export interface UserDTO {
 export interface AgentDTO {
   name: string;
   description: string;
-  healthy: boolean;
   busy: boolean;
   queue_len: number;
 }
@@ -154,7 +153,6 @@ export interface TaskUpdatedData {
 
 export interface AgentStatusData {
   agent: string;
-  healthy: boolean;
   busy: boolean;
   queue_len: number;
 }

@@ -3,10 +3,11 @@
 `uvicorn vdagent_backend.app:app` resolves `app` lazily (PEP 562), so importing this module (e.g.
 from tests) has no side effects. The app MUST run as a single process.
 
-Lifespan: open backend.db (schema applied), startup recovery (§4.6), the agent hub on
-`agent_listen` (agents dial in; startup fails if it cannot bind), MCP session manager. `/mcp` is
-routed ahead of everything else; the built FE (`frontend_dist`) is
-served at `/` with an SPA fallback when the directory exists.
+Lifespan: open backend.db (schema applied), load the agent plugins listed in `config.yaml`
+(`plugins.py`; a failing plugin is logged and skipped), startup recovery (§4.6), MCP session
+manager. On exit: stop the engine, then run the plugins' shutdown hooks. `/mcp` is routed ahead of
+everything else; the built FE (`frontend_dist`) is served at `/` with an SPA fallback when the
+directory exists.
 """
 
 from __future__ import annotations
@@ -27,9 +28,10 @@ from vdagent_backend.api.deps import Services
 from vdagent_backend.api.errors import error_response, install_error_handlers
 from vdagent_backend.config import Config, load_config
 from vdagent_backend.db.database import create_db
-from vdagent_backend.engine import AgentHub, Engine
+from vdagent_backend.engine import Engine
 from vdagent_backend.events import EventBus
 from vdagent_backend.mcp.server import create_mcp
+from vdagent_backend.plugins import PluginManager
 from vdagent_backend.tokens import TokenRegistry
 
 
@@ -42,15 +44,17 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        hub = AgentHub(cfg.agents)
-        engine = Engine(cfg, db, bus, tokens, hub)
+        plugins = PluginManager()
+        registry = await plugins.load(cfg.plugins)
+        engine = Engine(cfg, db, bus, tokens, registry)
         app.state.services = Services(cfg=cfg, db=db, bus=bus, engine=engine)
-        await engine.start()
         try:
+            await engine.start()
             async with mcp.lifespan():
                 yield
         finally:
             await engine.stop()
+            await plugins.close()
             await db.dispose()
 
     app = FastAPI(title="vdagent backend", lifespan=lifespan)

@@ -10,12 +10,7 @@ from pydantic import BaseModel, Field
 from vdagent_backend.api.deps import Svc, UserId
 from vdagent_backend.api.errors import ApiError, not_found
 from vdagent_backend.db import artifacts, repo
-from vdagent_backend.engine import (
-    AgentUnavailableError,
-    TaskFinishedError,
-    TaskNotFoundError,
-    UnknownAgentError,
-)
+from vdagent_backend.engine import TaskFinishedError, TaskNotFoundError, UnknownAgentError
 
 router = APIRouter(prefix="/api")
 
@@ -66,7 +61,7 @@ async def get_messages(
     before_seq: Annotated[int | None, Query(ge=1)] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> dict[str, Any]:
-    if agent not in svc.cfg.agents:
+    if agent not in svc.engine.registry:
         raise _unknown_agent(agent)
     rows = await repo.messages_page(svc.db, user_id, agent, before_seq, limit)
     return {
@@ -85,8 +80,6 @@ async def post_message(svc: Svc, user_id: UserId, agent: str, body: NewMessage) 
         task, inv = await svc.engine.post_message(user_id, agent, content)
     except UnknownAgentError:
         raise _unknown_agent(agent) from None
-    except AgentUnavailableError:
-        raise ApiError(503, "agent_unavailable", f"{agent} is unavailable") from None
     return {"task_id": task["id"], "invocation_id": inv["id"]}
 
 

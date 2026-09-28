@@ -1,14 +1,16 @@
 backend_db: ./var/backend.db
 warehouse_db: ./var/warehouse.db
-mcp_public_url: http://localhost:8000/mcp       # URL agents use to reach MCP; must be reachable from agent machines
-agent_listen: 127.0.0.1:50050                   # hub address; 0.0.0.0:50050 to accept agents from other machines
+mcp_public_url: http://localhost:8000/mcp       # URL plugins' MCP clients use (this Backend's own /mcp)
 frontend_dist: ./frontend/dist                  # served at / if present
 max_depth: 4
 max_steps: 12
-# Agents dial the hub and identify themselves by name; only the names listed here are accepted.
-agents:
-  orchestrator: {description: "Talks to the user, plans, delegates, writes final answers."}
-  data:         {description: "Queries the warehouse; returns dataset ids."}
-  compare:      {description: "Compares datasets, periods and segments."}
-  insight:      {description: "Explains trends, anomalies and drivers."}
-  report:       {description: "Builds formatted reports with charts."}
+# Agent plugins, loaded in this order at startup. Each module must export setup(api, opts) and is
+# configured by its own agents/<name>/.env. A plugin that fails to load is logged and skipped.
+plugins:
+  - module: vdagent_orchestrator
+  - module: vdagent_data
+  - module: vdagent_compare
+  - module: vdagent_insight
+  - module: vdagent_report
+  # - module: agent_template   # echo agent; copy agents/_template to start a new plugin
+  #   opts: {name: echo}

@@ -1,6 +1,6 @@
 # vdagent — Agents as In-Process Plugins — Design Spec
 
-Status: draft for review · Date: 2026-09-26
+Status: implemented · Date: 2026-09-26
 Supersedes: `2026-09-24-agent-connect-direction-design.md` (entirely).
 Amends: `2026-09-24-vdagent-design.md` (D8, D12, D13, §2, §4.1, §4.3, §4.4, §4.6, §4.7, §5, §10,
 §11, §12, §13) and `2026-09-24-agent-template-design.md` (host, contract, entrypoint, env loading).
@@ -58,7 +58,7 @@ business. The Backend only expects the interface.
 | P10 | **The final answer is implicit.** When `invoke` returns, the answer is the content of the last assistant step, which must have no tool calls, with nothing left unresolved (R5). There is no explicit `final`. |
 | P11 | **Health is removed.** A registered agent is always available. The `healthy` field, `503 agent_unavailable`, `error: <x> is unavailable` and the UI health dots are deleted. |
 | P12 | **Clean cutover.** `proto/`, `vdagent_proto`, `grpcio`, `grpcio-tools`, `engine/hub.py`, every `host.py`/`__main__.py`/`contract.py`, `agent_listen`, the `agents:` config block, `make agent-<name>` and the compose agent services are deleted. There is no dual mode. |
-| P13 | ◆ **Contract-violation failure reason** is `contract violation: <detail>`. This replaces both `protocol error: …` (engine) and `INTERNAL: contract violation: …` (host). |
+| P13 | **Contract-violation failure reason** is `contract violation: <detail>`. This replaces both `protocol error: …` (engine) and `INTERNAL: contract violation: …` (host). |
 
 ## 2. Architecture
 
@@ -105,7 +105,7 @@ backend/
     config.py                 # PluginSpec parsing
     plugins.py                # PluginManager, _PluginAPI, AgentRegistry  (new)
     engine/engine.py          # in-process turn driver + InvocationContext implementation
-    engine/context.py         # _TurnContext (the ctx object) and inbox events  (new)
+    engine/context.py         # TurnContext (the ctx object) and inbox events  (new)
     engine/waitgraph.py, api/, mcp/, db/, events.py, tokens.py, ids.py
   tests/
 agents/
@@ -343,20 +343,20 @@ sequenceDiagram
   Note over R: child finishes → reply future resolved
   R-->>I: reply text
   I->>R: ctx.emit_tool_result(...) → inbox ToolResult + ack
-  I-->>R: invoke returns → inbox Returned (done-callback)
+  I-->>R: invoke returns → inbox Ended (done-callback)
   R->>R: check R5 → final answer = last assistant content
 ```
 
-**Inbox events** (`engine/context.py`, all carry an `asyncio.Future` for the reply):
-- `Emit(content, tool_calls, ack)`
-- `ToolResult(tool_call_id, content, ack)`
-- `Call(tool_call_id, target, message, reply)`
-- `Ended(error: BaseException | None)`, posted by the invoke task's done-callback. It carries no
-  future.
+**Inbox events** (`engine/context.py`; all but `Ended` carry an `asyncio.Future` for the reply):
+- `Emit(content, tool_calls, future)`
+- `ToolResult(tool_call_id, content, future)`
+- `Call(tool_call_id, target, message, future)`
+- `Ended(task)`, posted by the invoke task's done-callback; the engine reads the task's outcome.
 
-**`_TurnContext`** implements `InvocationContext`. Each method checks `closed`, puts its event on
+**`TurnContext`** implements `InvocationContext`. Each method checks `closed`, puts its event on
 the run's inbox and awaits the future. It never touches the DB. Cancelling the plugin's task while
-it awaits an ack therefore cannot interrupt a DB write: the write runs in the run task.
+it awaits an ack therefore cannot interrupt a DB write: the write runs in the run task. Closing the
+context fails any event still queued with `ContractViolation("…: the turn is over")`.
 
 **Run loop** (replaces `hub.invoke` + `turn.read()`):
 `event = await inbox.get()`, then dispatch:
@@ -366,8 +366,8 @@ it awaits an ack therefore cannot interrupt a DB write: the write runs in the ru
 | `Emit` | R2: no unresolved tool calls of the previous step; tool-call ids non-empty and unique | Persist the assistant row, reset `unresolved`/`tool_calls`/`called` for the new step, remember `last_assistant = (content, has_tool_calls)`, ack |
 | `ToolResult` | R3: id is unresolved in the latest step; R4: no `call_agent` for the id is still pending (pending = its `reply` future is not done) | Persist the tool row, resolve the id, ack |
 | `Call` | R4: id belongs to the latest step, is named `send_to_agent`, is unresolved, and was not called before | Add the id to `called` and keep its `reply` future, then run the call checks (§5.4). Rejected: resolve `reply` with the error text. Accepted: enqueue the child; the child's finish resolves `reply` (the call is pending until then) |
-| `Ended(None)` | R5: nothing unresolved, and `last_assistant` exists without tool calls | Close ctx; the final answer is `last_assistant.content` → finish (§4.1 step 5 of the main spec) |
-| `Ended(exc)` | — | Close ctx; fail the turn per the mapping below |
+| `Ended` (returned) | R5: nothing unresolved, and `last_assistant` exists without tool calls | Close ctx; the final answer is `last_assistant.content` → finish (§4.1 step 5 of the main spec) |
+| `Ended` (raised) | — | Close ctx; fail the turn per the mapping below |
 
 The engine's run task awaits `inbox.get()` and checks cancellation between events, as it does now
 between frames. A `Call` is dispatched synchronously with its checks and the wait-for edge (I3),
@@ -379,14 +379,16 @@ instead of pushing `AgentCallResult` onto `run.outbound`. `run.outbound` is dele
 | Cause | Reason |
 |---|---|
 | `ContractViolation` from a check, or raised out of `invoke` | `contract violation: <detail>` |
-| `invoke` raised `AgentTimeoutError`, directly or as `__cause__`/`__context__` (today's `_find_timeout` walk) | `DEADLINE_EXCEEDED: <detail>` |
+| `invoke` raised `AgentTimeoutError`, directly, inside an exception group, or in its `__cause__` chain | `DEADLINE_EXCEEDED: <detail>` |
 | `invoke` raised any other `Exception` | `INTERNAL: <ExcType>: <detail>`, logged with traceback |
 | Task cancelled | `cancelled` (unchanged) |
 
-When a turn fails or is cancelled while `invoke` is still running (e.g. a violation raised on a
-future the plugin swallowed), the engine closes ctx, cancels the invoke task and awaits it,
-ignoring its outcome, before patching the stack (§4.6 of the main spec, unchanged). Pending `reply`
-futures are cancelled and late child results are discarded as today.
+When a turn ends while `invoke` is still running (e.g. a violation raised on a future the plugin
+swallowed), the engine closes ctx, cancels pending `reply` futures, and yields to the loop once so
+the plugin receives the `ContractViolation` at its offending call. It then cancels the invoke task
+and waits up to 5 s for it (a warning is logged if the plugin ignores cancellation), ignoring its
+outcome, before patching the stack (§4.6 of the main spec, unchanged). Late child results are
+discarded as today.
 
 **Cancel** (`POST /api/tasks/{id}/cancel`): as today, except that `run.rpc.cancel()` now cancels
 the plugin's invoke task. The plugin sees `CancelledError` (R9), and `ctx` rejects further calls.

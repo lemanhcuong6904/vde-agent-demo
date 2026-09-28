@@ -126,13 +126,13 @@ describe("task.updated", () => {
 describe("agent.status", () => {
   it("patches only the named agent", () => {
     const agents: AgentDTO[] = [
-      { name: "data", description: "d", healthy: true, busy: false, queue_len: 0 },
-      { name: "report", description: "r", healthy: true, busy: false, queue_len: 0 },
+      { name: "data", description: "d", busy: false, queue_len: 0 },
+      { name: "report", description: "r", busy: false, queue_len: 0 },
     ];
     qc.setQueryData(queryKeys.agents, agents);
-    applyEvent(qc, { event: "agent.status", data: { agent: "data", healthy: false, busy: true, queue_len: 2 } });
+    applyEvent(qc, { event: "agent.status", data: { agent: "data", busy: true, queue_len: 2 } });
     expect(qc.getQueryData<AgentDTO[]>(queryKeys.agents)).toEqual([
-      { name: "data", description: "d", healthy: false, busy: true, queue_len: 2 },
+      { name: "data", description: "d", busy: true, queue_len: 2 },
       agents[1],
     ]);
   });

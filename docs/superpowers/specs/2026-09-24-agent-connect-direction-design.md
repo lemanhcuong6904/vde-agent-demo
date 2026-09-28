@@ -4,6 +4,11 @@ Status: draft for review · Date: 2026-09-24
 Amends: `2026-09-24-vdagent-design.md` (D12, §2, §4.1, §4.3, §4.4, §4.6, §5, §7.1, §12, §13) and
 `2026-09-24-agent-template-design.md` (T7, §3, §4, §9, §10).
 
+> **Superseded (2026-09-26).** Agents are no longer processes: they are in-process Backend
+> plugins (`2026-09-26-agent-plugins-design.md`). The hub, `proto/agent.proto`, the template host,
+> `agent_listen`, `VDAGENT_BACKEND`, agent health and `make agent-<name>` described below were all
+> removed. Kept for history only.
+
 > **Later change — tokens removed (demo).** C4 and the token half of C12 were withdrawn after
 > implementation: `Hello` carries no token (field 2 reserved), the hub accepts any name listed in
 > `config.yaml`, there is no `VDAGENT_AGENT_TOKEN_*` variable, and the Backend's optional `.env` is

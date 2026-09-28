@@ -1,18 +1,17 @@
 [project]
 name = "vdagent-orchestrator"
 version = "0.1.0"
-description = "vdagent orchestrator agent (built from agents/_template; LiteLLM tool loop)"
+description = "vdagent orchestrator agent plugin (LiteLLM tool loop)"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-  "vdagent-proto",
-  "grpcio>=1.66",
+  "vdagent-sdk",
   "python-dotenv>=1.0",
   "litellm>=1.50",
   "mcp>=1.9",
 ]
 
 [tool.uv.sources]
-vdagent-proto = { workspace = true }
+vdagent-sdk = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

@@ -1,7 +1,7 @@
 # vdagent PoC (spec §12). `docker compose up --build`, then open http://localhost:8000.
-# Each `agents/<name>/.env` holds that agent's LLM settings (OPENAI_API_KEY, OPENAI_BASE_URL,
-# LLM_MODEL); agents dial the backend's hub at backend:50050 (`environment` wins over `env_file`).
-# The backend is configured by backend/config.compose.yaml alone (backend/.env is for local runs).
+# The backend runs the five agents in-process as plugins (backend/config.compose.yaml). Each plugin
+# reads its own agents/<name>/.env (OPENAI_API_KEY, OPENAI_BASE_URL, LLM_MODEL); .env files are kept
+# out of the image, so they are mounted read-only where the plugins look for them.
 
 x-python: &python
   build:
@@ -10,14 +10,6 @@ x-python: &python
   image: vdagent-python:latest
   volumes:
     - ./var:/app/var
-
-x-agent: &agent
-  <<: *python
-  environment:
-    VDAGENT_BACKEND: backend:50050
-  depends_on:
-    - backend
-  restart: unless-stopped
 
 services:
   seed:
@@ -32,36 +24,16 @@ services:
     command: ["uvicorn", "vdagent_backend.app:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       VDAGENT_CONFIG: /app/backend/config.compose.yaml
+    volumes:
+      - ./var:/app/var
+      - ./agents/orchestrator/.env:/app/agents/orchestrator/.env:ro
+      - ./agents/data/.env:/app/agents/data/.env:ro
+      - ./agents/compare/.env:/app/agents/compare/.env:ro
+      - ./agents/insight/.env:/app/agents/insight/.env:ro
+      - ./agents/report/.env:/app/agents/report/.env:ro
     ports:
       - "8000:8000"
-    expose:
-      - "50050"
     depends_on:
       seed:
         condition: service_completed_successfully
     restart: unless-stopped
-
-  orchestrator:
-    <<: *agent
-    command: ["python", "-m", "vdagent_orchestrator"]
-    env_file: agents/orchestrator/.env
-
-  data:
-    <<: *agent
-    command: ["python", "-m", "vdagent_data"]
-    env_file: agents/data/.env
-
-  compare:
-    <<: *agent
-    command: ["python", "-m", "vdagent_compare"]
-    env_file: agents/compare/.env
-
-  insight:
-    <<: *agent
-    command: ["python", "-m", "vdagent_insight"]
-    env_file: agents/insight/.env
-
-  report:
-    <<: *agent
-    command: ["python", "-m", "vdagent_report"]
-    env_file: agents/report/.env

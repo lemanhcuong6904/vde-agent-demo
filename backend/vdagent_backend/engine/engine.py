@@ -1,16 +1,18 @@
-"""Invocation engine (§4): scheduling, per-invocation turns over the agent hub, call checks,
-compaction, failure / cancel / restart handling, and SSE publication.
+"""Invocation engine (§4): scheduling, in-process agent turns, call checks, compaction,
+failure / cancel / restart handling, and SSE publication.
 
 Concurrency model (single process, single event loop):
 - One `Stack` per (user, agent): `running` is the lock holder, `queue` the FIFO of waiting
   invocations (§4.2). Only the holder's asyncio task writes that stack's messages (I1).
-- One asyncio task per running invocation drives its turn channel; `AgentCallResult`s for its
-  child calls are pushed onto its outbound queue by whichever task finishes the child.
+- One asyncio task per running invocation (the *run task*) drives its turn: it starts the plugin's
+  `agent.invoke(ctx)` as a separate task and handles the events `ctx` posts on the turn's inbox
+  (`engine/context.py`): contract checks R2–R5, persistence, SSE, agent calls. A child's reply
+  resolves the future its parent's `call_agent` awaits, set by whichever task finishes the child.
 - The per-user `WaitGraph` gets edge `caller → target` synchronously with the call checks, so the
   graph stays acyclic (I3).
-- Cancellation is cooperative: `cancel_task` flags the runs and cancels their in-flight turn or
-  compaction; each run then patches its own stack (I2) before releasing it. DB writes are never
-  interrupted.
+- Cancellation is cooperative: `cancel_task` flags the runs and cancels their in-flight invoke or
+  compaction task; each run then patches its own stack (I2) before releasing it. DB writes run in
+  the run task and are never interrupted.
 """
 
 from __future__ import annotations
@@ -27,25 +29,23 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from vdagent_backend.config import Config
 from vdagent_backend.db import repo
-from vdagent_backend.engine.hub import AgentError, AgentHub
+from vdagent_backend.engine.context import Call, Emit, Ended, Event, ToolResult, TurnContext
 from vdagent_backend.engine.waitgraph import WaitGraph
 from vdagent_backend.events import EventBus
 from vdagent_backend.ids import new_id
+from vdagent_backend.plugins import AgentRegistry
 from vdagent_backend.tokens import TokenRegistry
-from vdagent_proto import agent_pb2 as pb
+from vdagent_sdk import SEND_TO_AGENT, AgentTimeoutError, ContractViolation, McpEndpoint, Message, Peer
 
 log = logging.getLogger(__name__)
 
-SEND_TO_AGENT = "send_to_agent"
 RESTARTED = "backend restarted"
 CANCELLED = "cancelled"
+COMPACT_TIMEOUT_S = 150.0  # plugin model timeout (120 s) plus margin
+INVOKE_CANCEL_GRACE_S = 5.0  # how long a cancelled invoke may take to unwind before it is abandoned
 
 
 class UnknownAgentError(Exception):
-    pass
-
-
-class AgentUnavailableError(Exception):
     pass
 
 
@@ -57,8 +57,12 @@ class TaskFinishedError(Exception):
     pass
 
 
-class ProtocolError(Exception):
-    """Agent broke the frame rules of §5.3; the invocation fails with `protocol error: …`."""
+class _TurnFailed(Exception):
+    """The plugin's `invoke` raised; `reason` is the invocation's failure reason."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 class _Cancelled(Exception):
@@ -81,17 +85,18 @@ class Run:
     tool_call_id: str | None = None
 
     token: str | None = None
-    rpc: Any = None  # in-flight turn channel or compaction task, cancelled on task cancel
-    outbound: asyncio.Queue[pb.BackendFrame | None] = field(default_factory=asyncio.Queue)
+    rpc: asyncio.Task[Any] | None = None  # in-flight invoke or compaction task, cancelled on task cancel
     task: asyncio.Task[None] | None = None
     cancel_requested: bool = False
-    finished: bool = False  # left the stream; child results are discarded from here on
+    finished: bool = False  # left the turn; child results are discarded from here on
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
-    # §5.3 protocol state for the latest assistant message
+    # contract state (R2–R5) for the latest assistant step
     tool_calls: dict[str, str] = field(default_factory=dict)  # tool_call id → tool name
     unresolved: set[str] = field(default_factory=set)
     called: set[str] = field(default_factory=set)
+    replies: dict[str, asyncio.Future[str]] = field(default_factory=dict)  # tool_call id → awaited reply
+    last_assistant: tuple[str, bool] | None = None  # (content, had tool calls) of the latest step
     # accepted child calls awaiting their result: tool_call id → child run (one wait-for edge each)
     children: dict[str, Run] = field(default_factory=dict)
 
@@ -106,28 +111,68 @@ class Stack:
     queue: deque[Run] = field(default_factory=deque)
 
 
-def _to_proto(row: Mapping[str, Any]) -> pb.Message:
-    """A stored message as LLM history; inbound messages are rendered `[from: <sender>] <text>`."""
+def _to_message(row: Mapping[str, Any]) -> Message:
+    """A stored message as OpenAI-shaped history; inbound messages are rendered `[from: <sender>] <text>`."""
     role = row["role"]
     if role == "user":
-        return pb.Message(role=pb.USER, content=f"[from: {row['sender']}] {row['content']}")
+        return {"role": "user", "content": f"[from: {row['sender']}] {row['content']}"}
     if role == "assistant":
         calls = json.loads(row["tool_calls_json"]) if row["tool_calls_json"] else []
-        return pb.Message(
-            role=pb.ASSISTANT,
-            content=row["content"],
-            tool_calls=[pb.ToolCall(id=c["id"], name=c["name"], arguments_json=c["arguments_json"]) for c in calls],
-        )
-    return pb.Message(role=pb.TOOL, content=row["content"], tool_call_id=row["tool_call_id"] or "")
+        if not calls:
+            return {"role": "assistant", "content": row["content"]}
+        return {
+            "role": "assistant",
+            "content": row["content"] or None,
+            "tool_calls": [
+                {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["arguments_json"]}}
+                for c in calls
+            ],
+        }
+    return {"role": "tool", "tool_call_id": row["tool_call_id"] or "", "content": row["content"]}
+
+
+def _find_timeout(exc: BaseException) -> AgentTimeoutError | None:
+    """The first `AgentTimeoutError` in `exc`, its exception groups, or its `__cause__` chain."""
+    seen: set[int] = set()
+    stack = [exc]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, AgentTimeoutError):
+            return current
+        if isinstance(current, BaseExceptionGroup):
+            stack.extend(reversed(current.exceptions))  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+    return None
+
+
+def _describe(exc: BaseException) -> str:
+    while isinstance(exc, BaseExceptionGroup) and exc.exceptions:  # pyright: ignore[reportUnknownMemberType]
+        exc = exc.exceptions[0]  # pyright: ignore[reportUnknownVariableType]
+    text = str(exc)
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
 class Engine:
-    def __init__(self, cfg: Config, db: AsyncEngine, bus: EventBus, tokens: TokenRegistry, hub: AgentHub) -> None:
+    def __init__(
+        self,
+        cfg: Config,
+        db: AsyncEngine,
+        bus: EventBus,
+        tokens: TokenRegistry,
+        registry: AgentRegistry,
+        *,
+        compact_timeout_s: float = COMPACT_TIMEOUT_S,
+    ) -> None:
         self.cfg = cfg
         self.db = db
         self.bus = bus
         self.tokens = tokens
-        self.hub = hub
+        self.registry = registry
+        self.compact_timeout_s = compact_timeout_s
         self._stacks: dict[tuple[str, str], Stack] = {}
         self._graphs: dict[str, WaitGraph] = {}
         self._cancelled: set[str] = set()  # task ids cancelled while this process runs
@@ -137,18 +182,16 @@ class Engine:
     # ------------------------------------------------------------------ lifecycle
 
     async def start(self) -> None:
-        """Startup recovery, then accept agent sessions."""
+        """Startup recovery (§4.6)."""
         await self.recover()
-        await self.hub.start(self.cfg.agent_listen, self._on_health_change)
 
     async def stop(self) -> None:
-        """Abandon running invocations (startup recovery fails them next boot) and close the hub."""
+        """Abandon running invocations (startup recovery fails them next boot)."""
         self._stopping = True
         tasks = [s.running.task for s in self._stacks.values() if s.running is not None and s.running.task]
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await self.hub.close()
 
     async def recover(self) -> None:
         """§4.6: every queued/running invocation → failed (stack patched); every running task → failed."""
@@ -169,20 +212,18 @@ class Engine:
         stack = self._stacks.get((user_id, agent))
         return {
             "agent": agent,
-            "healthy": self.hub.is_healthy(agent),
             "busy": stack is not None and stack.running is not None,
             "queue_len": len(stack.queue) if stack is not None else 0,
         }
 
     def agents(self, user_id: str) -> list[dict[str, Any]]:
         out = []
-        for name, spec in self.cfg.agents.items():
-            status = self.agent_status(user_id, name)
+        for entry in self.registry:
+            status = self.agent_status(user_id, entry.name)
             out.append(
                 {
-                    "name": name,
-                    "description": spec.description,
-                    "healthy": status["healthy"],
+                    "name": entry.name,
+                    "description": entry.description,
                     "busy": status["busy"],
                     "queue_len": status["queue_len"],
                 }
@@ -203,10 +244,8 @@ class Engine:
 
     async def post_message(self, user_id: str, agent: str, content: str) -> tuple[dict[str, Any], dict[str, Any]]:
         """Human trigger (§4.1): new task + queued root invocation. Returns (task row, invocation row)."""
-        if agent not in self.cfg.agents:
+        if agent not in self.registry:
             raise UnknownAgentError(agent)
-        if not self.hub.is_healthy(agent):
-            raise AgentUnavailableError(agent)
         task, inv = await repo.create_task(self.db, user_id, agent, content)
         self._publish_task(task)
         self._publish_invocation(inv)
@@ -336,21 +375,16 @@ class Engine:
         except _Cancelled:
             return None, CANCELLED
         except asyncio.CancelledError:
-            if run.cancel_requested:  # local cancel of the in-flight turn or compaction
+            if run.cancel_requested:  # local cancel of the in-flight compaction
                 return None, CANCELLED
             raise
-        except ProtocolError as e:
-            return None, f"protocol error: {e}"
-        except AgentError as e:
-            return None, f"{e.code}: {e.detail}"
+        except ContractViolation as e:
+            return None, f"contract violation: {e}"
+        except _TurnFailed as e:
+            return None, e.reason
         except Exception as e:
             log.exception("invocation %s crashed", run.id)
             return None, f"internal error: {e}"
-        finally:
-            run.outbound.put_nowait(None)
-            if run.rpc is not None and not run.rpc.done():
-                run.rpc.cancel()
-            run.rpc = None
 
     async def _execute(self, run: Run) -> str:
         row = await repo.mark_invocation_running(self.db, run.id)
@@ -361,72 +395,114 @@ class Engine:
         run.check_cancel()
 
         await self._append(run, role="user", sender=run.caller, content=run.inbound_text)
-        run.token = self.tokens.issue(run.user_id, run.agent, run.id)
+        token = run.token = self.tokens.issue(run.user_id, run.agent, run.id)
         summary = await repo.get_summary(self.db, run.user_id, run.agent)
         history = await repo.stack_history(self.db, run.user_id, run.agent)
         run.check_cancel()
 
-        start = pb.InvokeStart(
+        entry = self.registry.get(run.agent)
+        assert entry is not None  # runs exist only for registered agents; the registry is immutable
+        ctx = TurnContext(
             invocation_id=run.id,
             task_id=run.task_id,
             user_id=run.user_id,
             summary=summary or "",
-            history=[_to_proto(m) for m in history],
-            peers=[pb.Peer(name=n, description=s.description) for n, s in self.cfg.agents.items() if n != run.agent],
-            mcp_url=self.cfg.mcp_public_url,
-            mcp_token=run.token,
+            history=[_to_message(m) for m in history],
+            peers=[Peer(name=e.name, description=e.description) for e in self.registry if e.name != run.agent],
+            mcp=McpEndpoint(url=self.cfg.mcp_public_url, token=token),
             max_steps=self.cfg.max_steps,
         )
-        run.outbound.put_nowait(pb.BackendFrame(start=start))
-        turn = self.hub.invoke(run.agent, run.outbound)
-        run.rpc = turn
-        while True:
-            frame = await turn.read()
-            kind = frame.WhichOneof("kind")
-            if kind == "message":
-                await self._on_message(run, frame.message)
-            elif kind == "call":
-                await self._on_call(run, frame.call)
-            elif kind == "final":
-                return self._on_final(run, frame.final.content)
+        invoke = asyncio.create_task(entry.agent.invoke(ctx), name=f"invoke {run.agent} {run.id}")
+        invoke.add_done_callback(lambda t: ctx.inbox.put_nowait(Ended(t)))
+        run.rpc = invoke
+        try:
+            while True:
+                final = await self._on_event(run, await ctx.inbox.get())
+                if final is not None:
+                    return final
+                run.check_cancel()
+        finally:
+            ctx.close()
+            await self._end_invoke(run, invoke)
+
+    async def _end_invoke(self, run: Run, invoke: asyncio.Task[None]) -> None:
+        """The turn is over: drop pending replies, then make sure the plugin's invoke task has ended."""
+        run.rpc = None
+        for future in run.replies.values():
+            future.cancel()
+        if not invoke.done():
+            await asyncio.sleep(0)  # one tick: the plugin sees the ContractViolation set on the call it awaits
+        if not invoke.done():
+            invoke.cancel()
+            done, _ = await asyncio.wait({invoke}, timeout=INVOKE_CANCEL_GRACE_S)
+            if not done:
+                log.warning("invocation %s: %s's invoke ignored cancellation; abandoning it", run.id, run.agent)
+        if invoke.done() and not invoke.cancelled():
+            invoke.exception()  # its outcome was handled or no longer matters; mark it retrieved
+
+    async def _on_event(self, run: Run, event: Event) -> str | None:
+        """Handle one `ctx` event; returns the final answer once `invoke` returned cleanly."""
+        if isinstance(event, Ended):
+            return self._on_ended(run, event.task)
+        try:
+            if isinstance(event, Emit):
+                await self._on_emit(run, event)
+            elif isinstance(event, ToolResult):
+                await self._on_tool_result(run, event)
             else:
-                raise ProtocolError("empty agent frame")
-            run.check_cancel()
+                await self._on_call(run, event)  # resolves or keeps its future
+                return None
+        except ContractViolation as violation:
+            if not event.future.done():
+                event.future.set_exception(violation)
+            raise
+        if not event.future.done():
+            event.future.set_result(None)
+        return None
 
-    async def _on_message(self, run: Run, msg: pb.Message) -> None:
-        if msg.role == pb.ASSISTANT:
-            if run.unresolved:
-                raise ProtocolError(f"assistant message while tool calls are unresolved: {sorted(run.unresolved)}")
-            ids = [tc.id for tc in msg.tool_calls]
-            if any(not i for i in ids) or len(set(ids)) != len(ids):
-                raise ProtocolError("assistant tool_calls need unique, non-empty ids")
-            run.tool_calls = {tc.id: tc.name for tc in msg.tool_calls}
-            run.unresolved = set(ids)
-            run.called = set()
-            calls = [{"id": tc.id, "name": tc.name, "arguments_json": tc.arguments_json} for tc in msg.tool_calls]
-            await self._append(run, role="assistant", content=msg.content, tool_calls=calls or None)
-        elif msg.role == pb.TOOL:
-            if msg.tool_call_id not in run.unresolved:
-                raise ProtocolError(f"tool message for unknown or already resolved tool call '{msg.tool_call_id}'")
-            run.unresolved.discard(msg.tool_call_id)
-            await self._append(run, role="tool", content=msg.content, tool_call_id=msg.tool_call_id)
-        else:
-            raise ProtocolError(f"unexpected message role {pb.Role.Name(msg.role)}")
+    async def _on_emit(self, run: Run, event: Emit) -> None:
+        if run.unresolved:
+            raise ContractViolation(
+                f"emit_assistant: tool calls {sorted(run.unresolved)} of the previous step have no result yet (R2)"
+            )
+        ids = [tc.id for tc in event.tool_calls]
+        if any(not i for i in ids) or len(set(ids)) != len(ids):
+            raise ContractViolation(f"emit_assistant: tool-call ids must be non-empty and unique, got {ids} (R2)")
+        run.tool_calls = {tc.id: tc.name for tc in event.tool_calls}
+        run.unresolved = set(ids)
+        run.called = set()
+        run.replies = {}
+        run.last_assistant = (event.content, bool(ids))
+        calls = [{"id": tc.id, "name": tc.name, "arguments_json": tc.arguments_json} for tc in event.tool_calls]
+        await self._append(run, role="assistant", content=event.content, tool_calls=calls or None)
 
-    async def _on_call(self, run: Run, req: pb.AgentCallRequest) -> None:
-        tcid = req.tool_call_id
+    async def _on_tool_result(self, run: Run, event: ToolResult) -> None:
+        tcid = event.tool_call_id
+        what = f"emit_tool_result({tcid!r})"
+        reply = run.replies.get(tcid)
+        if reply is not None and not reply.done():
+            raise ContractViolation(f"{what}: its call_agent is still waiting for the reply (R4)")
+        if tcid not in run.unresolved:
+            raise ContractViolation(f"{what}: not an unresolved tool call of the latest assistant step (R3)")
+        run.unresolved.discard(tcid)
+        await self._append(run, role="tool", content=event.content, tool_call_id=tcid)
+
+    async def _on_call(self, run: Run, event: Call) -> None:
+        tcid = event.tool_call_id
+        what = f"call_agent({tcid!r})"
         name = run.tool_calls.get(tcid)
         if name is None:
-            raise ProtocolError(f"call for unknown tool call '{tcid}'")
+            raise ContractViolation(f"{what}: not a tool call of the latest assistant step (R4)")
         if name != SEND_TO_AGENT:
-            raise ProtocolError(f"call for tool call '{tcid}' which is not {SEND_TO_AGENT}")
+            raise ContractViolation(f"{what}: tool call is {name!r}, not {SEND_TO_AGENT} (R4)")
         if tcid not in run.unresolved:
-            raise ProtocolError(f"call for already resolved tool call '{tcid}'")
+            raise ContractViolation(f"{what}: tool call already has a result (R4)")
         if tcid in run.called:
-            raise ProtocolError(f"duplicate call for tool call '{tcid}'")
+            raise ContractViolation(f"{what}: already called once (R4)")
         run.called.add(tcid)
+        run.replies[tcid] = event.future
 
-        target = req.target
+        target = event.target
         fields: dict[str, Any] = {
             "task_id": run.task_id,
             "user_id": run.user_id,
@@ -435,13 +511,13 @@ class Engine:
             "parent_id": run.id,
             "tool_call_id": tcid,
             "depth": run.depth + 1,
-            "inbound_text": req.message,
+            "inbound_text": event.message,
         }
         error = self._call_error(run, target)
         if error is not None:
             row = await repo.insert_invocation(self.db, id=new_id("inv"), status="rejected", error=error, **fields)
             self._publish_invocation(row)
-            self._send_result(run, tcid, ok=False, content=error)
+            self._send_result(run, tcid, error)
             return
 
         # Accept: the wait-for edge is added in the same synchronous step as the checks (I3).
@@ -452,7 +528,7 @@ class Engine:
             task_id=run.task_id,
             caller=run.agent,
             depth=run.depth + 1,
-            inbound_text=req.message,
+            inbound_text=event.message,
             parent=run,
             tool_call_id=tcid,
         )
@@ -469,31 +545,49 @@ class Engine:
 
     def _call_error(self, run: Run, target: str) -> str | None:
         """§4.4 checks in table order; the tool-error content, or None to accept."""
-        if target not in self.cfg.agents:
+        if target not in self.registry:
             return f"error: unknown agent '{target}'"
         if target == run.agent:
             return "error: you cannot call yourself"
         if run.depth + 1 > self.cfg.max_depth:
             return "error: call depth limit reached; answer your caller with what you have"
-        if not self.hub.is_healthy(target):
-            return f"error: {target} is unavailable"
         if self.graph(run.user_id).has_path(target, run.agent):
             return f"error: calling {target} would deadlock (it is waiting on you); answer with what you have"
         return None
 
-    def _on_final(self, run: Run, content: str) -> str:
+    def _on_ended(self, run: Run, task: asyncio.Task[None]) -> str:
+        """`invoke` finished: map its exception, or enforce R5 and return the final answer."""
+        run.check_cancel()
+        if task.cancelled():
+            raise _TurnFailed("INTERNAL: invoke was cancelled")
+        error = task.exception()
+        if error is not None:
+            raise self._failure(run, error)
         if run.unresolved:
-            raise ProtocolError(f"final while tool calls are unresolved: {sorted(run.unresolved)}")
-        return content
+            raise ContractViolation(f"invoke returned with unresolved tool calls {sorted(run.unresolved)} (R5)")
+        if run.last_assistant is None or run.last_assistant[1]:
+            raise ContractViolation("invoke returned without a final assistant step (one without tool calls) (R5)")
+        return run.last_assistant[0]
+
+    @staticmethod
+    def _failure(run: Run, error: BaseException) -> Exception:
+        if isinstance(error, ContractViolation):
+            return error
+        timeout = _find_timeout(error)
+        if timeout is not None:
+            log.warning("invocation %s (%s): model timed out: %s", run.id, run.agent, timeout)
+            return _TurnFailed(f"DEADLINE_EXCEEDED: {timeout}")
+        log.error("invocation %s (%s): invoke raised", run.id, run.agent, exc_info=error)
+        return _TurnFailed(f"INTERNAL: {_describe(error)}")
 
     # ------------------------------------------------------------------ child results
 
-    def _send_result(self, run: Run, tool_call_id: str, *, ok: bool, content: str) -> None:
+    def _send_result(self, run: Run, tool_call_id: str, content: str) -> None:
         if run.finished or run.task_id in self._cancelled:
-            return  # parent stream gone / cancelled task: result discarded
-        run.outbound.put_nowait(
-            pb.BackendFrame(call_result=pb.AgentCallResult(tool_call_id=tool_call_id, ok=ok, content=content))
-        )
+            return  # parent turn over / cancelled task: result discarded
+        future = run.replies.get(tool_call_id)
+        if future is not None and not future.done():
+            future.set_result(content)
 
     def _drop_call(self, run: Run, tool_call_id: str) -> Run | None:
         child = run.children.pop(tool_call_id, None)
@@ -501,14 +595,14 @@ class Engine:
             self.graph(run.user_id).remove(run.agent, child.agent)
         return child
 
-    def _deliver(self, child: Run, *, ok: bool, content: str) -> None:
+    def _deliver(self, child: Run, content: str) -> None:
         parent = child.parent
         if parent is None or child.tool_call_id is None:
             return
         if parent.children.get(child.tool_call_id) is not child:
             return  # parent already ended; its edges are gone
         self._drop_call(parent, child.tool_call_id)
-        self._send_result(parent, child.tool_call_id, ok=ok, content=content)
+        self._send_result(parent, child.tool_call_id, content)
 
     def _settle(self, run: Run) -> None:
         """The run left its stream: no more results, token revoked, outgoing edges removed."""
@@ -525,7 +619,7 @@ class Engine:
         if row is not None:
             self._publish_invocation(row)
         if run.parent is not None:
-            self._deliver(run, ok=True, content=final)
+            self._deliver(run, final)
         else:
             await self._finish_task(run.task_id, "completed")
 
@@ -536,7 +630,7 @@ class Engine:
         if row is not None:
             self._publish_invocation(row)
         if run.parent is not None:
-            self._deliver(run, ok=False, content=f"error: {run.agent} failed: {reason}")
+            self._deliver(run, f"error: {run.agent} failed: {reason}")
         else:
             await self._finish_task(run.task_id, "failed")
 
@@ -576,20 +670,25 @@ class Engine:
         if not rows:
             return
         previous = await repo.get_summary(self.db, run.user_id, run.agent) or ""
-        request = pb.CompactRequest(previous_summary=previous, messages=[_to_proto(r) for r in rows])
-        compaction = asyncio.ensure_future(self.hub.compact(run.agent, request))
+        entry = self.registry.get(run.agent)
+        assert entry is not None
+        coro = asyncio.wait_for(entry.agent.compact(previous, [_to_message(r) for r in rows]), self.compact_timeout_s)
+        compaction = asyncio.ensure_future(coro)
         run.rpc = compaction
         try:
-            resp = await compaction
+            summary = await compaction
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            reason = f"{e.code}: {e.detail}" if isinstance(e, AgentError) else repr(e)
+            reason = f"no summary within {self.compact_timeout_s:g}s" if isinstance(e, TimeoutError) else _describe(e)
             log.warning("compaction of stack (%s, %s) failed, continuing: %s", run.user_id, run.agent, reason)
             return
         finally:
             run.rpc = None
-        await repo.apply_compaction(self.db, run.user_id, run.agent, resp.summary, [r["id"] for r in rows])
+        if not isinstance(summary, str):  # pyright: ignore[reportUnnecessaryIsInstance]
+            log.warning("compaction of stack (%s, %s) returned %s, not str; continuing", run.user_id, run.agent, type(summary).__name__)
+            return
+        await repo.apply_compaction(self.db, run.user_id, run.agent, summary, [r["id"] for r in rows])
 
     # ------------------------------------------------------------------ persistence + events
 
@@ -610,7 +709,3 @@ class Engine:
 
     def _publish_status(self, user_id: str, agent: str) -> None:
         self.bus.publish(user_id, "agent.status", self.agent_status(user_id, agent))
-
-    def _on_health_change(self, agent: str, _healthy: bool) -> None:
-        for user_id in self.bus.user_ids():
-            self._publish_status(user_id, agent)

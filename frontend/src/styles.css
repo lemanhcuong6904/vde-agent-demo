@@ -143,20 +143,6 @@ pre {
   }
 }
 
-.health-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex: none;
-}
-.health-dot.ok {
-  background: var(--ok);
-}
-.health-dot.down {
-  background: var(--err);
-}
-
 /* ---------- layout ---------- */
 
 .app {
@@ -375,10 +361,6 @@ pre {
 .status-pill.idle {
   background: #f0fdf4;
   color: var(--ok);
-}
-.status-pill.down {
-  background: var(--err-soft);
-  color: var(--err);
 }
 
 .chat-scroll {
@@ -636,9 +618,6 @@ pre {
 .composer textarea {
   flex: 1;
   resize: none;
-}
-.composer.disabled textarea {
-  background: var(--bg);
 }
 .send-btn {
   align-self: stretch;
