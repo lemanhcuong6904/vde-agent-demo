@@ -12,5 +12,6 @@ plugins:
   - module: vdagent_compare
   - module: vdagent_insight
   - module: vdagent_report
+  - module: vdagent_chart
   # - module: agent_template   # echo agent; copy agents/_template to start a new plugin
   #   opts: {name: echo}
