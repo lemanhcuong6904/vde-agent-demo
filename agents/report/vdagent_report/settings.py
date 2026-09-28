@@ -1,4 +1,4 @@
-"""LLM settings: this plugin folder's `.env` over the Backend's process environment.
+"""Model settings: this plugin folder's `.env` over the Backend's process environment.
 
 Every plugin shares the Backend's process, so the `.env` is read with `dotenv_values()` into a
 mapping and `os.environ` is never modified (SDK rule R11).
@@ -17,6 +17,8 @@ from vdagent_sdk import PluginConfigError
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"  # agents/<name>/.env
 REQUIRED_VARS: tuple[str, ...] = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "LLM_MODEL")
 DEFAULT_LLM_TIMEOUT_S = 120.0
+DEFAULT_JUDGE_MODEL = "typesafe/jev-1.13"
+DEFAULT_JEV_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,8 @@ class Settings:
     openai_base_url: str
     llm_model: str
     llm_timeout_s: float
+    judge_model: str
+    jev_decisions_url: str
 
 
 def read_env(env_file: Path = ENV_FILE) -> dict[str, str]:
@@ -34,7 +38,7 @@ def read_env(env_file: Path = ENV_FILE) -> dict[str, str]:
 
 
 def load_settings(env: Mapping[str, str]) -> Settings:
-    """Read and validate the LLM settings; `PluginConfigError` names the offending variable."""
+    """Read and validate the model settings; `PluginConfigError` names the offending variable."""
     for var in REQUIRED_VARS:
         if not env.get(var, "").strip():
             raise PluginConfigError(f"missing required environment variable {var}")
@@ -50,4 +54,6 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         openai_base_url=env["OPENAI_BASE_URL"].strip(),
         llm_model=env["LLM_MODEL"].strip(),
         llm_timeout_s=llm_timeout_s,
+        judge_model=env.get("JUDGE_MODEL", "").strip() or DEFAULT_JUDGE_MODEL,
+        jev_decisions_url=env.get("JEV_DECISIONS_URL", "").strip() or DEFAULT_JEV_DECISIONS_URL,
     )

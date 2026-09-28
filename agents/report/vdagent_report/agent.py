@@ -1,31 +1,37 @@
-"""This agent's brain: a thin tool-calling loop over LiteLLM with the Backend's MCP tools.
+"""This agent's brain: a hand-built LangGraph graph with a Jev quality gate (see graph.py).
 
-Per turn: open an MCP session, offer its tools plus `send_to_agent`, and step the model up to
-`ctx.max_steps` times (`tool_choice="none"` on the last step). Every assistant step and tool
-result is reported through `ctx`; tool calls of one step run concurrently.
+Per turn: open an MCP session, offer its tools plus `send_to_agent`, and run the graph. Tool-call
+steps are reported through `ctx` as they happen; the final answer only after Jev accepted it (or
+the one revision was spent).
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from vdagent_sdk import SEND_TO_AGENT, Agent, AgentTimeoutError, InvocationContext, Message, Peer, ToolCall
+import openai
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import HumanMessage, SystemMessage, convert_to_messages
+from pydantic import SecretStr
+from langchain_openai import ChatOpenAI
+from vdagent_sdk import SEND_TO_AGENT, Agent, AgentTimeoutError, InvocationContext, Message, Peer
 
-from .llm import AssistantMessage, LiteLLMClient, LLMClient, LLMTimeoutError, ToolChoice
-from .mcp_client import McpSession, McpSessionFactory, open_mcp_session, openai_tool_schema, run_mcp_tool
-from .settings import load_settings
+from .graph import STEP_LIMIT_TEXT, ReportTurn
+from .judge import JevJudge, Judge
+from .mcp_client import McpSessionFactory, open_mcp_session, openai_tool_schema
+from .settings import DEFAULT_LLM_TIMEOUT_S, load_settings
+
+__all__ = ["DESCRIPTION", "NAME", "STEP_LIMIT_TEXT", "LangGraphAgent", "build_agent"]
 
 NAME = "report"
 DESCRIPTION = "Builds formatted reports with charts."
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 SUMMARY_HEADING = "## Summary of earlier work with this user"
-STEP_LIMIT_TEXT = "[step limit reached before I could finish; no further tool calls were made]"
 COMPACT_TOOL_TEXT_CHARS = 2_000
 
 
@@ -82,124 +88,72 @@ def render_for_compaction(previous_summary: str, messages: Sequence[Message]) ->
     return "\n".join(lines)
 
 
-class LiteLLMAgent:
+class LangGraphAgent:
     def __init__(
         self,
         *,
-        llm: LLMClient,
+        model: BaseChatModel,
+        judge: Judge,
         mcp_session_factory: McpSessionFactory = open_mcp_session,
         system_prompt: str,
         compact_prompt: str,
+        timeout_s: float = DEFAULT_LLM_TIMEOUT_S,
     ) -> None:
-        self._llm = llm
+        self._model = model
+        self._judge = judge
         self._mcp_session_factory = mcp_session_factory
         self._system_prompt = system_prompt
         self._compact_prompt = compact_prompt
-
-    async def _complete(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], tool_choice: ToolChoice
-    ) -> AssistantMessage:
-        try:
-            return await self._llm.complete(messages, tools, tool_choice)
-        except LLMTimeoutError as exc:
-            raise AgentTimeoutError(str(exc)) from exc
+        self._timeout_s = timeout_s
 
     async def invoke(self, ctx: InvocationContext) -> None:
         async with self._mcp_session_factory(ctx.mcp.url, ctx.mcp.token) as mcp:
-            await _Turn(ctx, mcp, self._system_prompt, self._complete).run()
+            mcp_tools = [t for t in await mcp.list_tools() if t.name != SEND_TO_AGENT]
+            tools = [openai_tool_schema(t) for t in mcp_tools]
+            if ctx.peers:
+                tools.append(send_to_agent_tool(ctx.peers))
+            turn = ReportTurn(
+                ctx=ctx,
+                mcp=mcp,
+                model=self._model,
+                tools=tools,
+                mcp_tool_names={t.name for t in mcp_tools},
+                judge=self._judge,
+                system_prompt=build_system_prompt(self._system_prompt, ctx.summary),
+                timeout_s=self._timeout_s,
+            )
+            state = {"messages": convert_to_messages(ctx.history)}
+            await turn.graph().ainvoke(state, {"recursion_limit": 3 * ctx.max_steps + 10})
 
     async def compact(self, previous_summary: str, messages: list[Message]) -> str:
-        reply = await self._complete(
-            [
-                {"role": "system", "content": self._compact_prompt},
-                {"role": "user", "content": render_for_compaction(previous_summary, messages)},
-            ],
-            [],
-            "none",
-        )
-        return reply.content.strip()
-
-
-class _Turn:
-    """State of one `invoke` (kept off the agent object: one agent serves concurrent turns)."""
-
-    def __init__(
-        self,
-        ctx: InvocationContext,
-        mcp: McpSession,
-        system_prompt: str,
-        complete: Callable[[list[dict[str, Any]], list[dict[str, Any]], ToolChoice], Awaitable[AssistantMessage]],
-    ) -> None:
-        self._ctx = ctx
-        self._mcp = mcp
-        self._system_prompt = system_prompt
-        self._complete = complete
-        self._mcp_tool_names: set[str] = set()
-
-    async def run(self) -> None:
-        ctx = self._ctx
-        tools: list[dict[str, Any]] = []
-        for tool in await self._mcp.list_tools():
-            if tool.name == SEND_TO_AGENT:
-                continue
-            self._mcp_tool_names.add(tool.name)
-            tools.append(openai_tool_schema(tool))
-        if ctx.peers:
-            tools.append(send_to_agent_tool(ctx.peers))
-
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": build_system_prompt(self._system_prompt, ctx.summary)},
-            *ctx.history,
+        prompt = [
+            SystemMessage(self._compact_prompt),
+            HumanMessage(render_for_compaction(previous_summary, messages)),
         ]
-        for step in range(1, ctx.max_steps + 1):
-            last_step = step == ctx.max_steps
-            reply = await self._complete(messages, tools, "none" if last_step else "auto")
-            if last_step and reply.tool_calls:
-                # The model ignored tool_choice="none"; there is no step left to run the calls.
-                reply = AssistantMessage(content=reply.content or STEP_LIMIT_TEXT)
-            await ctx.emit_assistant(reply.content, reply.tool_calls)
-            messages.append(reply.to_openai())
-            if not reply.tool_calls:
-                return
-            async with asyncio.TaskGroup() as tg:
-                tasks = [tg.create_task(self._run_tool_call(tc)) for tc in reply.tool_calls]
-            for tc, task in zip(reply.tool_calls, tasks, strict=True):
-                messages.append({"role": "tool", "tool_call_id": tc.id, "content": task.result()})
-
-    async def _run_tool_call(self, tc: ToolCall) -> str:
-        content = await self._tool_content(tc)
-        await self._ctx.emit_tool_result(tc.id, content)
-        return content
-
-    async def _tool_content(self, tc: ToolCall) -> str:
         try:
-            arguments = json.loads(tc.arguments_json) if tc.arguments_json.strip() else {}
-        except json.JSONDecodeError as exc:
-            return f"error: invalid JSON arguments for '{tc.name}': {exc}"
-        if not isinstance(arguments, dict):
-            return f"error: arguments for '{tc.name}' must be a JSON object"
-
-        if tc.name == SEND_TO_AGENT and self._ctx.peers:
-            target, message = arguments.get("agent"), arguments.get("message")
-            if not isinstance(target, str) or not target.strip():
-                return "error: send_to_agent requires 'agent' (the name of the agent to call)"
-            if not isinstance(message, str) or not message.strip():
-                return "error: send_to_agent requires a non-empty 'message'"
-            return await self._ctx.call_agent(tc.id, target.strip(), message)
-        if tc.name in self._mcp_tool_names:
-            return await run_mcp_tool(self._mcp, tc.name, arguments)
-        return f"error: unknown tool '{tc.name}'"
+            async with asyncio.timeout(self._timeout_s):
+                reply = await self._model.ainvoke(prompt)
+        except (TimeoutError, openai.APITimeoutError) as exc:
+            raise AgentTimeoutError(f"model call timed out after {self._timeout_s:g}s") from exc
+        return reply.text.strip()
 
 
 def build_agent(env: Mapping[str, str]) -> Agent:
     """Raises `PluginConfigError` naming the missing or invalid setting."""
     settings = load_settings(env)
-    for noisy in ("httpx", "httpx2", "LiteLLM"):  # per-request INFO lines drown out agent logs
+    for noisy in ("httpx", "openai"):  # per-request INFO lines drown out agent logs
         logging.getLogger(noisy).setLevel(logging.WARNING)
-    llm = LiteLLMClient(
+    model = ChatOpenAI(
         model=settings.llm_model,
-        api_base=settings.openai_base_url,
-        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+        api_key=SecretStr(settings.openai_api_key),
+        timeout=settings.llm_timeout_s,
+    )
+    judge = JevJudge(url=settings.jev_decisions_url, api_key=settings.openai_api_key, model=settings.judge_model)
+    return LangGraphAgent(
+        model=model,
+        judge=judge,
+        system_prompt=load_prompt("system"),
+        compact_prompt=load_prompt("compact"),
         timeout_s=settings.llm_timeout_s,
     )
-    return LiteLLMAgent(llm=llm, system_prompt=load_prompt("system"), compact_prompt=load_prompt("compact"))

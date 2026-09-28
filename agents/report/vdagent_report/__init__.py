@@ -1,4 +1,4 @@
-"""vdagent agent plugin (LiteLLM tool loop). The Backend imports this module, listed under
+"""vdagent agent plugin (LangGraph with a Jev quality gate). The Backend imports this module, listed under
 `plugins:` in `backend/config.yaml`, and calls `setup(api, opts)` once at startup."""
 
 from __future__ import annotations

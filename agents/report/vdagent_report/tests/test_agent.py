@@ -1,10 +1,9 @@
-"""The plugin entry and the LiteLLM tool loop, driven through a recording `ctx` with a scripted LLM
-and a fake MCP session."""
+"""The plugin entry and the LangGraph turn (agent → tools → assess → finalize), driven through a
+recording `ctx` with a scripted chat model, a scripted judge and a fake MCP session."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import sys
@@ -14,48 +13,99 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import httpx
+import openai
 import pytest
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from vdagent_sdk import Agent, AgentTimeoutError, McpEndpoint, Message, Peer, PluginConfigError, ToolCall
 
 from .. import setup
-from ..agent import DESCRIPTION, NAME, LiteLLMAgent, build_agent
-from ..llm import AssistantMessage, LLMTimeoutError
+from ..agent import DESCRIPTION, NAME, STEP_LIMIT_TEXT, LangGraphAgent, build_agent
+from ..judge import REVIEW, Verdict
 from ..mcp_client import MAX_TOOL_RESULT_CHARS, TRUNCATION_MARKER, McpSession, McpTool, ToolOutcome
 from ..settings import load_settings, read_env
 
 SYSTEM_PROMPT = "You are the test agent."
 COMPACT_PROMPT = "Summarise the conversation."
 LLM_ENV = {"OPENAI_API_KEY": "k", "OPENAI_BASE_URL": "http://llm", "LLM_MODEL": "m"}
+INBOUND = "[from: orchestrator] chart revenue by region"
 PEERS = [
     Peer("data", "Queries the warehouse; returns dataset ids."),
     Peer("compare", "Compares datasets, periods and segments."),
 ]
+PASS = Verdict(acceptable=0.9, problem="none")
 
-Script = AssistantMessage | Exception | Callable[[list[dict[str, Any]], list[dict[str, Any]], str], AssistantMessage]
+Script = AIMessage | Exception
 
 
 @dataclass
-class LLMCall:
-    messages: list[dict[str, Any]]
+class ChatCall:
+    messages: list[BaseMessage]
     tools: list[dict[str, Any]]
-    tool_choice: str
+
+    @property
+    def system(self) -> str:
+        first = self.messages[0]
+        return str(first.content) if isinstance(first, SystemMessage) else ""
 
 
 @dataclass
-class ScriptedLLM:
-    """Returns scripted replies in order; the last entry repeats once the script is exhausted."""
+class Recorder:
+    """Scripted replies in order (the last entry repeats); every request is recorded."""
 
     script: Sequence[Script]
-    calls: list[LLMCall] = field(default_factory=list)
+    calls: list[ChatCall] = field(default_factory=list)
 
-    async def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], tool_choice: str):
-        self.calls.append(LLMCall(json.loads(json.dumps(messages)), tools, tool_choice))
-        entry = self.script[min(len(self.calls), len(self.script)) - 1]
+
+class ScriptedChat(BaseChatModel):
+    rec: Any
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted"
+
+    def bind_tools(self, tools: Sequence[Any], *, tool_choice: Any = None, **kwargs: Any) -> Any:
+        return self.bind(tools=[convert_to_openai_tool(t) for t in tools], **kwargs)
+
+    def _reply(self, messages: list[BaseMessage], tools: list[dict[str, Any]]) -> ChatResult:
+        rec: Recorder = self.rec
+        rec.calls.append(ChatCall(list(messages), tools))
+        entry = rec.script[min(len(rec.calls), len(rec.script)) - 1]
         if isinstance(entry, Exception):
             raise entry
-        if callable(entry):
-            return entry(messages, tools, tool_choice)
-        return entry
+        return ChatResult(generations=[ChatGeneration(message=entry.model_copy(update={"id": None}))])
+
+    def _generate(self, messages: list[BaseMessage], stop: Any = None, run_manager: Any = None, **kw: Any) -> ChatResult:
+        return self._reply(messages, kw.get("tools", []))
+
+    async def _agenerate(
+        self, messages: list[BaseMessage], stop: Any = None, run_manager: Any = None, **kw: Any
+    ) -> ChatResult:
+        return self._reply(messages, kw.get("tools", []))
+
+
+def chat(*script: Script) -> tuple[ScriptedChat, Recorder]:
+    rec = Recorder(list(script))
+    return ScriptedChat(rec=rec), rec
+
+
+def ai(content: str = "", *calls: tuple[str | None, str, dict[str, Any]]) -> AIMessage:
+    return AIMessage(content=content, tool_calls=[{"id": i, "name": n, "args": a, "type": "tool_call"} for i, n, a in calls])
+
+
+@dataclass
+class ScriptedJudge:
+    """Verdicts in order (the last repeats); records what it was asked to assess."""
+
+    verdicts: Sequence[Verdict] = (PASS,)
+    asked: list[tuple[str, str, list[str]]] = field(default_factory=list)
+
+    async def assess(self, request: str, answer: str, artifacts: Sequence[str]) -> Verdict:
+        self.asked.append((request, answer, list(artifacts)))
+        return self.verdicts[min(len(self.asked), len(self.verdicts)) - 1]
 
 
 @dataclass
@@ -82,7 +132,7 @@ class FakeMcp:
 class RecordingContext:
     """An `InvocationContext` that records every step; `call_agent` awaits `replies[tool_call_id]`."""
 
-    history: list[Message] = field(default_factory=lambda: [{"role": "user", "content": "[from: user] revenue by region?"}])
+    history: list[Message] = field(default_factory=lambda: [{"role": "user", "content": INBOUND}])
     summary: str = ""
     max_steps: int = 12
     peers: list[Peer] = field(default_factory=lambda: list(PEERS))
@@ -90,6 +140,7 @@ class RecordingContext:
     invocation_id: str = "inv_1"
     task_id: str = "t_1"
     user_id: str = "u_1"
+    memory: Any = None
     replies: dict[str, asyncio.Future[str]] = field(default_factory=dict)
     events: list[tuple[str, Any, Any]] = field(default_factory=list)
     calls: list[tuple[str, str, str]] = field(default_factory=list)
@@ -110,6 +161,9 @@ class RecordingContext:
     def tool_results(self) -> dict[str, str]:
         return {tcid: content for kind, tcid, content in self.events if kind == "tool"}
 
+    def answers(self) -> list[str]:
+        return [content for kind, content, calls in self.events if kind == "assistant" and not calls]
+
 
 @dataclass
 class FakeAPI:
@@ -124,21 +178,25 @@ class FakeAPI:
         raise AssertionError("this plugin registers no shutdown hook")
 
 
-RUN_QUERY = McpTool(
-    name="run_query",
-    description="Run a read-only SELECT on the warehouse.",
-    input_schema={"type": "object", "properties": {"sql": {"type": "string"}}, "required": ["sql"]},
+MAKE_CHART = McpTool(
+    name="make_chart",
+    description="Render a chart from a dataset.",
+    input_schema={"type": "object", "properties": {"dataset_id": {"type": "string"}}, "required": ["dataset_id"]},
 )
 
 
-def tool_call(id: str, name: str, args: dict[str, Any] | str) -> ToolCall:
-    return ToolCall(id=id, name=name, arguments_json=args if isinstance(args, str) else json.dumps(args))
-
-
-def make_agent(llm: ScriptedLLM, mcp: FakeMcp) -> LiteLLMAgent:
-    return LiteLLMAgent(
-        llm=llm, mcp_session_factory=mcp.factory, system_prompt=SYSTEM_PROMPT, compact_prompt=COMPACT_PROMPT
+def make_agent(model: ScriptedChat, mcp: FakeMcp, judge: ScriptedJudge | None = None) -> LangGraphAgent:
+    return LangGraphAgent(
+        model=model,
+        judge=judge or ScriptedJudge(),
+        mcp_session_factory=mcp.factory,
+        system_prompt=SYSTEM_PROMPT,
+        compact_prompt=COMPACT_PROMPT,
     )
+
+
+def api_timeout() -> openai.APITimeoutError:
+    return openai.APITimeoutError(request=httpx.Request("POST", "http://llm/chat/completions"))
 
 
 async def _until(probe: Callable[[], bool]) -> None:
@@ -155,7 +213,7 @@ def test_setup_registers_this_agent_built_from_the_plugin_env(monkeypatch: pytes
     api = FakeAPI()
     setup(api, {})
     ((name, (description, agent)),) = api.agents.items()
-    assert (name, description) == (NAME, DESCRIPTION) and isinstance(agent, LiteLLMAgent)
+    assert (name, description) == (NAME, DESCRIPTION) and isinstance(agent, LangGraphAgent)
 
 
 def test_setup_fails_with_the_missing_variable_named(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -183,7 +241,14 @@ def test_settings_name_the_missing_variable_and_default_the_timeout() -> None:
         load_settings(env)
     with pytest.raises(PluginConfigError, match="LLM_TIMEOUT_S"):
         load_settings({**env, "LLM_MODEL": "m", "LLM_TIMEOUT_S": "0"})
-    assert load_settings({**env, "LLM_MODEL": "m"}).llm_timeout_s == 120.0
+    settings = load_settings({**env, "LLM_MODEL": "m"})
+    assert (settings.llm_timeout_s, settings.judge_model, settings.jev_decisions_url) == (
+        120.0,
+        "typesafe/jev-1.13",
+        "https://openrouter.ai/api/alpha/decisions",
+    )
+    custom = load_settings({**env, "LLM_MODEL": "m", "JUDGE_MODEL": " j ", "JEV_DECISIONS_URL": " http://jev "})
+    assert (custom.judge_model, custom.jev_decisions_url) == ("j", "http://jev")
 
 
 def test_build_agent_reports_missing_configuration() -> None:
@@ -191,144 +256,180 @@ def test_build_agent_reports_missing_configuration() -> None:
         build_agent({"OPENAI_API_KEY": "k"})
 
 
-# --------------------------------------------------------------------------- tool loop
+# --------------------------------------------------------------------------- the graph: agent ⇄ tools
 
 
-async def test_terminates_at_max_steps_with_tool_choice_none_on_last_step() -> None:
-    # A model that keeps asking for tools, even when told not to.
-    llm = ScriptedLLM([AssistantMessage(content="", tool_calls=[tool_call("c", "run_query", {"sql": "SELECT 1"})])])
-    mcp = FakeMcp(tools=[RUN_QUERY], handlers={"run_query": lambda a: ToolOutcome('{"dataset_id": "ds_1"}')})
+async def test_last_step_has_no_tools_and_a_model_ignoring_that_yields_the_step_limit_text() -> None:
+    model, rec = chat(ai("", ("c", "make_chart", {"dataset_id": "ds_1"})))  # keeps asking for tools
+    mcp = FakeMcp(tools=[MAKE_CHART], handlers={"make_chart": lambda a: ToolOutcome("ch_1")})
     ctx = RecordingContext(max_steps=3)
-    await make_agent(llm, mcp).invoke(ctx)
+    await make_agent(model, mcp).invoke(ctx)
 
-    assert [c.tool_choice for c in llm.calls] == ["auto", "auto", "none"]
+    assert [len(c.tools) > 0 for c in rec.calls] == [True, True, False]
     assert ctx.kinds() == ["assistant", "tool", "assistant", "tool", "assistant"]
-    _, content, calls = ctx.events[-1]
-    assert calls == [] and content != ""
+    assert ctx.events[-1] == ("assistant", STEP_LIMIT_TEXT, [])
 
 
 async def test_concurrent_send_to_agent_calls_each_await_their_own_result() -> None:
-    llm = ScriptedLLM(
-        [
-            AssistantMessage(
-                content="Asking both.",
-                tool_calls=[
-                    tool_call("tc_a", "send_to_agent", {"agent": "data", "message": "revenue by region 2025"}),
-                    tool_call("tc_b", "send_to_agent", {"agent": "compare", "message": "compare ds_1 vs ds_2"}),
-                ],
-            ),
-            AssistantMessage(content="Revenue grew in every region (ds_9)."),
-        ]
+    model, rec = chat(
+        ai(
+            "Asking both.",
+            ("tc_a", "send_to_agent", {"agent": "data", "message": "revenue by region 2025"}),
+            ("tc_b", "send_to_agent", {"agent": "compare", "message": "compare ds_1 vs ds_2"}),
+        ),
+        ai("Chart ch_9 saved."),
     )
     loop = asyncio.get_running_loop()
     ctx = RecordingContext(replies={"tc_a": loop.create_future(), "tc_b": loop.create_future()})
-    turn = asyncio.create_task(make_agent(llm, FakeMcp(tools=[], handlers={})).invoke(ctx))
+    turn = asyncio.create_task(make_agent(model, FakeMcp(tools=[], handlers={})).invoke(ctx))
 
     await _until(lambda: len(ctx.calls) == 2)
-    assert sorted(ctx.calls) == [
-        ("tc_a", "data", "revenue by region 2025"),
-        ("tc_b", "compare", "compare ds_1 vs ds_2"),
-    ]
+    assert ctx.events == [("assistant", "Asking both.", ["tc_a", "tc_b"])]
     ctx.replies["tc_b"].set_result("ds_9")
     await _until(lambda: "tc_b" in ctx.tool_results())
     assert "tc_a" not in ctx.tool_results()
     ctx.replies["tc_a"].set_result("error: calling data would deadlock")
     await turn
 
-    assert ctx.events[-3:-1] == [("tool", "tc_b", "ds_9"), ("tool", "tc_a", "error: calling data would deadlock")]
-    assert ctx.events[-1] == ("assistant", "Revenue grew in every region (ds_9).", [])
-    tool_messages = {m["tool_call_id"]: m["content"] for m in llm.calls[1].messages if m["role"] == "tool"}
+    assert ctx.events[-1] == ("assistant", "Chart ch_9 saved.", [])
+    tool_messages = {m.tool_call_id: m.content for m in rec.calls[1].messages if isinstance(m, ToolMessage)}
     assert tool_messages == {"tc_a": "error: calling data would deadlock", "tc_b": "ds_9"}
 
 
-async def test_mcp_results_are_emitted_as_tool_results() -> None:
+async def test_mcp_results_are_emitted_and_the_first_request_carries_prompt_history_and_tools() -> None:
     big = "x" * (MAX_TOOL_RESULT_CHARS + 500)
-    llm = ScriptedLLM(
-        [
-            AssistantMessage(
-                content="",
-                tool_calls=[
-                    tool_call("q1", "run_query", {"sql": "SELECT region FROM dim_store"}),
-                    tool_call("q2", "run_query", {"sql": "SELECT * FROM fact_sales"}),
-                ],
-            ),
-            AssistantMessage(content="Done: ds_1."),
-        ]
+    model, rec = chat(
+        ai("", ("q1", "make_chart", {"dataset_id": "ds_1"}), ("q2", "make_chart", {"dataset_id": "ds_2"})),
+        ai("Done: ch_1."),
     )
-    results = {"SELECT region FROM dim_store": '{"dataset_id": "ds_1"}', "SELECT * FROM fact_sales": big}
-    mcp = FakeMcp(tools=[RUN_QUERY], handlers={"run_query": lambda a: ToolOutcome(results[a["sql"]])})
-    ctx = RecordingContext(summary="User prefers EUR.")
-    await make_agent(llm, mcp).invoke(ctx)
+    results = {"ds_1": "ch_1", "ds_2": big}
+    mcp = FakeMcp(tools=[MAKE_CHART], handlers={"make_chart": lambda a: ToolOutcome(results[a["dataset_id"]])})
+    ctx = RecordingContext(
+        summary="User prefers EUR.",
+        history=[
+            {"role": "user", "content": "[from: user] earlier"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": INBOUND},
+        ],
+    )
+    await make_agent(model, mcp).invoke(ctx)
 
     assert mcp.opened_with == [("http://localhost:8000/mcp", "tok-123")]
-    assert sorted(mcp.calls, key=lambda c: c[1]["sql"]) == [
-        ("run_query", {"sql": "SELECT * FROM fact_sales"}),
-        ("run_query", {"sql": "SELECT region FROM dim_store"}),
+    assert ctx.tool_results() == {"q1": "ch_1", "q2": big[:MAX_TOOL_RESULT_CHARS] + TRUNCATION_MARKER}
+    first = rec.calls[0]
+    assert first.system == f"{SYSTEM_PROMPT}\n\n## Summary of earlier work with this user\nUser prefers EUR."
+    assert [(type(m).__name__, m.content) for m in first.messages[1:]] == [
+        ("HumanMessage", "[from: user] earlier"),
+        ("AIMessage", "ok"),
+        ("HumanMessage", INBOUND),
     ]
-    tool_msgs = ctx.tool_results()
-    assert tool_msgs["q1"] == '{"dataset_id": "ds_1"}'
-    assert tool_msgs["q2"] == big[:MAX_TOOL_RESULT_CHARS] + TRUNCATION_MARKER
-
-    first = llm.calls[0]
-    assert first.messages[0] == {
-        "role": "system",
-        "content": f"{SYSTEM_PROMPT}\n\n## Summary of earlier work with this user\nUser prefers EUR.",
-    }
-    assert first.messages[1:] == [{"role": "user", "content": "[from: user] revenue by region?"}]
     tools = {t["function"]["name"]: t["function"] for t in first.tools}
-    assert tools["run_query"]["parameters"] == RUN_QUERY.input_schema
+    assert tools["make_chart"]["parameters"] == MAKE_CHART.input_schema
     assert tools["send_to_agent"]["parameters"]["properties"]["agent"]["enum"] == ["data", "compare"]
-    assert "- data: Queries the warehouse; returns dataset ids." in tools["send_to_agent"]["description"]
 
 
 async def test_tool_failures_become_error_tool_content_and_the_turn_continues() -> None:
     def failing(args: dict[str, Any]) -> ToolOutcome:
-        if args["sql"] == "boom":
+        if args["dataset_id"] == "boom":
             raise ConnectionError("MCP connection reset")
-        return ToolOutcome("only SELECT statements are allowed", is_error=True)
+        return ToolOutcome("unknown dataset", is_error=True)
 
-    llm = ScriptedLLM(
-        [
-            AssistantMessage(
-                content="",
-                tool_calls=[
-                    tool_call("e1", "run_query", {"sql": "INSERT INTO x VALUES (1)"}),
-                    tool_call("e2", "run_query", {"sql": "boom"}),
-                    tool_call("e3", "run_query", "{not json"),
-                    tool_call("e4", "drop_database", {}),
-                    tool_call("e5", "send_to_agent", {"agent": "data"}),
-                ],
-            ),
-            AssistantMessage(content="I could not run that query."),
-        ]
+    model, _ = chat(
+        ai(
+            "",
+            ("e1", "make_chart", {"dataset_id": "ds_x"}),
+            ("e2", "make_chart", {"dataset_id": "boom"}),
+            ("e4", "drop_database", {}),
+            ("e5", "send_to_agent", {"agent": "data"}),
+        ),
+        ai("I could not chart that."),
     )
     ctx = RecordingContext()
-    await make_agent(llm, FakeMcp(tools=[RUN_QUERY], handlers={"run_query": failing})).invoke(ctx)
+    await make_agent(model, FakeMcp(tools=[MAKE_CHART], handlers={"make_chart": failing})).invoke(ctx)
 
-    tool_msgs = ctx.tool_results()
-    assert tool_msgs["e1"] == "error: only SELECT statements are allowed"
-    assert tool_msgs["e2"].startswith("error:") and "MCP connection reset" in tool_msgs["e2"]
-    assert tool_msgs["e3"].startswith("error: invalid JSON arguments for 'run_query'")
-    assert tool_msgs["e4"] == "error: unknown tool 'drop_database'"
-    assert tool_msgs["e5"] == "error: send_to_agent requires a non-empty 'message'"
-    assert ctx.events[-1] == ("assistant", "I could not run that query.", [])
+    results = ctx.tool_results()
+    assert results["e1"] == "error: unknown dataset"
+    assert results["e2"].startswith("error:") and "MCP connection reset" in results["e2"]
+    assert results["e4"] == "error: unknown tool 'drop_database'"
+    assert results["e5"] == "error: send_to_agent requires a non-empty 'message'"
+    assert ctx.events[-1] == ("assistant", "I could not chart that.", [])
 
 
-async def test_llm_timeout_is_agent_timeout_and_other_failures_propagate() -> None:
-    timeout = make_agent(ScriptedLLM([LLMTimeoutError("LLM call timed out after 120s")]), FakeMcp([], {}))
-    with pytest.raises(AgentTimeoutError, match="timed out after 120s"):
-        await timeout.invoke(RecordingContext())
-    broken = make_agent(ScriptedLLM([RuntimeError("provider returned 500")]), FakeMcp([], {}))
+async def test_tool_calls_without_ids_get_unique_ids_used_for_their_results() -> None:
+    model, _ = chat(ai("", (None, "make_chart", {"dataset_id": "a"}), (None, "make_chart", {"dataset_id": "b"})), ai("done"))
+    ctx = RecordingContext()
+    mcp = FakeMcp(tools=[MAKE_CHART], handlers={"make_chart": lambda a: ToolOutcome(a["dataset_id"])})
+    await make_agent(model, mcp).invoke(ctx)
+
+    _, _, ids = ctx.events[0]
+    assert len(set(ids)) == 2 and all(ids)
+    assert sorted(ctx.tool_results()) == sorted(ids)
+
+
+async def test_model_timeout_is_agent_timeout_and_other_failures_propagate() -> None:
+    timeout, _ = chat(api_timeout())
+    with pytest.raises(AgentTimeoutError):
+        await make_agent(timeout, FakeMcp([], {})).invoke(RecordingContext())
+    broken, _ = chat(RuntimeError("provider returned 500"))
     with pytest.raises(RuntimeError, match="provider returned 500"):
-        await broken.invoke(RecordingContext())
+        await make_agent(broken, FakeMcp([], {})).invoke(RecordingContext())
+
+
+# --------------------------------------------------------------------------- the graph: quality gate
+
+
+async def test_an_accepted_draft_is_emitted_once_as_the_final_answer() -> None:
+    model, _ = chat(ai("", ("c1", "make_chart", {"dataset_id": "ds_1"})), ai("Chart ch_7 of ds_1; report rp_3."))
+    judge = ScriptedJudge([PASS])
+    mcp = FakeMcp(tools=[MAKE_CHART], handlers={"make_chart": lambda a: ToolOutcome('{"chart_id": "ch_7", "report": "rp_3"}')})
+    ctx = RecordingContext()
+    await make_agent(model, mcp, judge).invoke(ctx)
+
+    assert judge.asked == [(INBOUND, "Chart ch_7 of ds_1; report rp_3.", ["ch_7", "rp_3"])]
+    assert ctx.kinds() == ["assistant", "tool", "assistant"]
+    assert ctx.answers() == ["Chart ch_7 of ds_1; report rp_3."]
+
+
+async def test_a_rejected_draft_is_revised_with_the_problem_specific_review_and_only_the_revision_is_emitted() -> None:
+    model, rec = chat(ai("Chart ch_1 for 2025."), ai("Chart ch_1 for 2025 and ch_2 for 2024."))
+    judge = ScriptedJudge([Verdict(acceptable=0.2, problem="missing_part"), PASS])
+    ctx = RecordingContext()
+    await make_agent(model, FakeMcp([], {}), judge).invoke(ctx)
+
+    assert ctx.events == [("assistant", "Chart ch_1 for 2025 and ch_2 for 2024.", [])]
+    revision_request = rec.calls[1].messages
+    assert [type(m).__name__ for m in revision_request[-2:]] == ["AIMessage", "HumanMessage"]
+    assert revision_request[-2].content == "Chart ch_1 for 2025."
+    assert REVIEW["missing_part"] in str(revision_request[-1].content)
+    assert [answer for _, answer, _ in judge.asked] == ["Chart ch_1 for 2025.", "Chart ch_1 for 2025 and ch_2 for 2024."]
+
+
+async def test_there_is_at_most_one_revision() -> None:
+    model, rec = chat(ai("draft 1"), ai("draft 2"), ai("draft 3"))
+    judge = ScriptedJudge([Verdict(acceptable=0.1, problem="unclear")])
+    ctx = RecordingContext()
+    await make_agent(model, FakeMcp([], {}), judge).invoke(ctx)
+
+    assert len(rec.calls) == 2 and len(judge.asked) == 2
+    assert ctx.events == [("assistant", "draft 2", [])]
+
+
+async def test_no_revision_when_the_step_budget_is_spent() -> None:
+    model, rec = chat(ai("", ("c1", "make_chart", {"dataset_id": "ds_1"})), ai("only draft"))
+    judge = ScriptedJudge([Verdict(acceptable=0.1, problem="no_numbers")])
+    ctx = RecordingContext(max_steps=2)
+    await make_agent(model, FakeMcp([MAKE_CHART], {"make_chart": lambda a: ToolOutcome("ch_1")}), judge).invoke(ctx)
+
+    assert len(rec.calls) == 2 and len(judge.asked) == 1
+    assert ctx.answers() == ["only draft"]
 
 
 # --------------------------------------------------------------------------- compaction
 
 
 async def test_compact_summarises_with_the_compact_prompt() -> None:
-    llm = ScriptedLLM([AssistantMessage(content="  - User wants EUR.\n- ds_1: revenue by region 2025  ")])
-    summary = await make_agent(llm, FakeMcp([], {})).compact(
+    model, rec = chat(ai("  - User wants EUR.\n- ds_1: revenue by region 2025  "))
+    summary = await make_agent(model, FakeMcp([], {})).compact(
         "- Earlier: ds_0 is 2024 revenue.",
         [
             {"role": "user", "content": "[from: user] use EUR please"},
@@ -337,16 +438,14 @@ async def test_compact_summarises_with_the_compact_prompt() -> None:
         ],
     )
     assert summary == "- User wants EUR.\n- ds_1: revenue by region 2025"
-    (only,) = llm.calls
-    assert only.tool_choice == "none"
-    assert only.messages[0] == {"role": "system", "content": COMPACT_PROMPT}
-    rendered = only.messages[1]["content"]
+    (only,) = rec.calls
+    assert only.tools == [] and only.system == COMPACT_PROMPT
+    rendered = str(only.messages[1].content)
     assert "ds_0 is 2024 revenue" in rendered and "[from: user] use EUR please" in rendered
-    assert "Here is ds_1." in rendered
     assert "y" * 2000 + "…[truncated]" in rendered and "y" * 2001 not in rendered
 
 
 async def test_compact_timeout_is_agent_timeout() -> None:
-    agent = make_agent(ScriptedLLM([LLMTimeoutError("LLM call timed out after 120s")]), FakeMcp([], {}))
+    model, _ = chat(api_timeout())
     with pytest.raises(AgentTimeoutError):
-        await agent.compact("", [])
+        await make_agent(model, FakeMcp([], {})).compact("", [])

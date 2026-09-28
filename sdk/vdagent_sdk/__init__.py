@@ -159,10 +159,13 @@ class InvocationContext(Protocol):
     peers: list[Peer]
     """Every other registered agent."""
     mcp: McpEndpoint
-    memory: Memory
-    """This user's notes for the invoked agent (R1). The plugin cannot choose another scope."""
     max_steps: int
     """Budget of assistant steps for this turn (R7)."""
+
+    @property
+    def memory(self) -> Memory:
+        """This user's notes for the invoked agent (R1). The plugin cannot choose another scope."""
+        ...
 
     async def emit_assistant(self, content: str, tool_calls: Sequence[ToolCall] = ()) -> None:
         """Record one assistant step. A step without tool calls that ends the turn is the answer."""

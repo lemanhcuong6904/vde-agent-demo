@@ -13,12 +13,14 @@ import asyncio
 import logging
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import openai
 from langchain.agents import create_agent
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
+from pydantic import SecretStr
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from vdagent_sdk import Agent, AgentTimeoutError, InvocationContext, Message
 
@@ -98,7 +100,8 @@ class LangChainAgent:
                 ],
             )
             # Each step passes through a few graph nodes; the step budget itself is CtxBridge's.
-            await agent.ainvoke({"messages": ctx.history}, {"recursion_limit": 4 * ctx.max_steps + 10})
+            messages: list[AnyMessage | dict[str, Any]] = [*ctx.history]  # OpenAI-shaped dicts
+            await agent.ainvoke({"messages": messages}, {"recursion_limit": 4 * ctx.max_steps + 10})
 
     async def compact(self, previous_summary: str, messages: list[Message]) -> str:
         prompt = [
@@ -121,13 +124,13 @@ def build_agent(env: Mapping[str, str]) -> Agent:
     model = ChatOpenAI(
         model=settings.llm_model,
         base_url=settings.openai_base_url,
-        api_key=settings.openai_api_key,
+        api_key=SecretStr(settings.openai_api_key),
         timeout=settings.llm_timeout_s,
     )
     embeddings = OpenAIEmbeddings(
         model=settings.embed_model,
         base_url=settings.openai_base_url,
-        api_key=settings.openai_api_key,
+        api_key=SecretStr(settings.openai_api_key),
         timeout=settings.llm_timeout_s,
         check_embedding_ctx_length=False,  # send text, not tiktoken ids: the endpoint is not OpenAI's
     )
