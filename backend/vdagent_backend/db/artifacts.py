@@ -16,6 +16,39 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from vdagent_backend.ids import new_id
 
 
+class InvocationArtifactStore:
+    """Chart persistence capability bound to one authenticated invocation."""
+
+    def __init__(self, db: AsyncEngine, user_id: str, invocation_id: str) -> None:
+        self._db = db
+        self._user_id = user_id
+        self._invocation_id = invocation_id
+
+    async def save_chart_spec(
+        self,
+        *,
+        title: str,
+        chart_spec: dict[str, Any],
+        idempotency_key: str,
+        dataset_hash: str,
+        lineage: dict[str, Any] | None = None,
+        validation: dict[str, Any] | None = None,
+        limitations: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return await insert_chart_spec(
+            self._db,
+            user_id=self._user_id,
+            invocation_id=self._invocation_id,
+            title=title,
+            chart_spec=chart_spec,
+            idempotency_key=idempotency_key,
+            dataset_hash=dataset_hash,
+            lineage=lineage,
+            validation=validation,
+            limitations=limitations,
+        )
+
+
 def _canonical_chart_spec(
     chart_spec: dict[str, Any],
     dataset_hash: str,

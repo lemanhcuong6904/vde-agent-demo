@@ -20,12 +20,29 @@ class ChartPluginAgent:
             return
         scenario = text.removeprefix("chart demo ").strip()
         try:
-            result = await self._service.execute_async(load_demo_task(scenario))
+            task = load_demo_task(scenario)
+            result = await self._service.execute_async(task)
         except KeyError:
             await ctx.emit_assistant(f"Unknown chart demo scenario: {scenario}")
             return
         if result.chart_artifacts:
-            await ctx.emit_assistant("Created chart artifact: " + ", ".join(result.chart_artifacts))
+            refs = list(result.chart_artifacts)
+            store = getattr(ctx, "artifacts", None)
+            if store is not None:
+                refs = []
+                for local_ref in result.chart_artifacts:
+                    local = self._service.artifacts[local_ref.removesuffix("@1")]
+                    saved = await store.save_chart_spec(
+                        title=local["presentation"]["title"],
+                        chart_spec=local["render_spec"],
+                        idempotency_key=f"{task.idempotency_key}:{local_ref}",
+                        dataset_hash=local["dataset"]["dataset_hash"],
+                        lineage={"input_artifact_refs": local["lineage"]},
+                        validation={"overall_result": "pass"},
+                        limitations=list(local.get("limitations", ())),
+                    )
+                    refs.append(f"{saved['id']}@{saved['version']}")
+            await ctx.emit_assistant("Created chart artifact: " + ", ".join(refs))
         elif result.dependency_requests:
             request = result.dependency_requests[0]
             await ctx.emit_assistant(f"Chart could not run: required artifact {request['artifact_id']}@{request['version']} is unavailable.")

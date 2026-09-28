@@ -13,7 +13,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from vdagent_sdk import ContractViolation, McpEndpoint, Memory, Message, Peer, ToolCall
+from vdagent_sdk import ArtifactStore, ContractViolation, McpEndpoint, Memory, Message, Peer, ToolCall
 
 
 @dataclass(frozen=True, eq=False)
@@ -60,6 +60,7 @@ class TurnContext:
         peers: list[Peer],
         mcp: McpEndpoint,
         memory: Memory,
+        artifacts: ArtifactStore,
         max_steps: int,
     ) -> None:
         self.invocation_id = invocation_id
@@ -70,6 +71,7 @@ class TurnContext:
         self.peers = peers
         self.mcp = mcp
         self.memory = memory  # direct DB access: not a transcript event, outside R2–R5
+        self.artifacts = artifacts
         self.max_steps = max_steps
         self.inbox: asyncio.Queue[Event] = asyncio.Queue()
         self._closed = False

@@ -54,6 +54,7 @@ __all__ = [
     "SEND_TO_AGENT",
     "Agent",
     "AgentTimeoutError",
+    "ArtifactStore",
     "ContractViolation",
     "InvocationContext",
     "McpEndpoint",
@@ -146,6 +147,12 @@ class Memory(Protocol):
         ...
 
 
+class ArtifactStore(Protocol):
+    """Invocation-scoped capability for immutable chart artifacts."""
+
+    async def save_chart_spec(self, **kwargs: Any) -> dict[str, Any]: ...
+
+
 class InvocationContext(Protocol):
     """Everything one turn knows, plus the only ways to report progress. Built by the Backend."""
 
@@ -165,6 +172,11 @@ class InvocationContext(Protocol):
     @property
     def memory(self) -> Memory:
         """This user's notes for the invoked agent (R1). The plugin cannot choose another scope."""
+        ...
+
+    @property
+    def artifacts(self) -> ArtifactStore:
+        """Write immutable artifacts only for this user and invocation."""
         ...
 
     async def emit_assistant(self, content: str, tool_calls: Sequence[ToolCall] = ()) -> None:

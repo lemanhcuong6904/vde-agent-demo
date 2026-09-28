@@ -84,3 +84,20 @@ async def test_chart_spec_is_user_scoped_immutable_and_idempotent(harness) -> No
             validation=validation,
             limitations=limitations,
         )
+
+
+@pytest.mark.asyncio
+async def test_invocation_artifact_store_persists_chart_spec_for_its_owner(harness) -> None:
+    task_id = await harness.post("data", "prepare a chart")
+    await harness.wait_task(task_id, "completed")
+    invocation_id = (await harness.invocations(task_id))[0]["id"]
+
+    stored = await artifacts.InvocationArtifactStore(harness.db, ALICE, invocation_id).save_chart_spec(
+        title="Trend",
+        chart_spec={"mark": "line"},
+        idempotency_key="chart-target-1",
+        dataset_hash="sha256:dataset",
+    )
+
+    assert stored["id"].startswith("csp_")
+    assert await artifacts.get_chart_spec(harness.db, BOB, stored["id"]) is None
