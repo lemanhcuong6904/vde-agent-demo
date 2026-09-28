@@ -683,6 +683,28 @@ async def test_events_are_published_for_the_owning_user(harness: Harness) -> Non
     assert bob.queue.empty()
 
 
+async def test_ctx_memory_is_scoped_to_the_invoked_agent_and_user_and_outlives_the_task(harness: Harness) -> None:
+    seen: list[list[str]] = []
+
+    async def orchestrator(s: Session) -> None:
+        await s.ask("data", "remember something")
+        await s.final("ok")
+
+    async def data(s: Session) -> None:
+        seen.append([n.text for n in await s.ctx.memory.recent()])
+        await s.ctx.memory.save(f"{s.ctx.user_id} asked: {s.inbound}", "fact")
+        await s.final("saved")
+
+    harness.on("orchestrator", orchestrator)
+    harness.on("data", data)
+    await harness.wait_task(await harness.post("orchestrator", "go"), "completed")
+    await harness.wait_task(await harness.post("data", "again"), "completed")
+    await harness.wait_task(await harness.post("data", "as bob", user_id="u_000000000002"), "completed")
+
+    assert seen == [[], [f"{ALICE} asked: [from: orchestrator] remember something"], []]
+    assert await harness.agents["orchestrator"].starts[0].memory.recent() == []
+
+
 async def test_agent_list_comes_from_the_registry_without_health(harness: Harness) -> None:
     agents = harness.engine.agents(ALICE)
     assert [a["name"] for a in agents] == ["orchestrator", "data", "compare", "insight", "report"]

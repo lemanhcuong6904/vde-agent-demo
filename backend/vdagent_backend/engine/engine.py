@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from vdagent_backend.config import Config
 from vdagent_backend.db import repo
+from vdagent_backend.db.memory import ScopedMemory
 from vdagent_backend.engine.context import Call, Emit, Ended, Event, ToolResult, TurnContext
 from vdagent_backend.engine.waitgraph import WaitGraph
 from vdagent_backend.events import EventBus
@@ -410,6 +411,7 @@ class Engine:
             history=[_to_message(m) for m in history],
             peers=[Peer(name=e.name, description=e.description) for e in self.registry if e.name != run.agent],
             mcp=McpEndpoint(url=self.cfg.mcp_public_url, token=token),
+            memory=ScopedMemory(self.db, run.user_id, run.agent),
             max_steps=self.cfg.max_steps,
         )
         invoke = asyncio.create_task(entry.agent.invoke(ctx), name=f"invoke {run.agent} {run.id}")

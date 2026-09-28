@@ -19,7 +19,8 @@ The Backend then runs each registered agent's turns by awaiting `agent.invoke(ct
 event loop. A turn follows these rules. Rules marked (Backend) are checked by `ctx`: breaking one
 raises `ContractViolation` at the offending call and fails the turn, even if the plugin catches it.
 
-- R1  No memory between turns: `ctx.summary` + `ctx.history` is the whole truth.
+- R1  No hidden memory between turns: `ctx.summary`, `ctx.history` and `ctx.memory` are the whole
+      truth. Keep state that spans turns in `ctx.memory`, never on `self` or elsewhere.
 - R2  (Backend) Emit an assistant step (with its tool calls) before any result or `call_agent` for
       those calls. A new assistant step may only be emitted once every tool call of the previous
       one has a result. Tool-call ids are non-empty and unique within a step.
@@ -32,7 +33,8 @@ raises `ContractViolation` at the offending call and fails the turn, even if the
       be emitted after `invoke` returns.
 - R6  Tool failures become result content `error: …` and the turn continues. Model timeout →
       raise `AgentTimeoutError`. Any other exception fails the turn.
-- R7  Make at most `ctx.max_steps` model calls.
+- R7  Emit at most `ctx.max_steps` assistant steps. Internal model calls (embeddings, extraction,
+      judges, classifiers) are the plugin's own budget.
 - R8  One agent object serves concurrent turns: keep per-turn state off `self`.
 - R9  Never swallow `asyncio.CancelledError`; a cancelled task arrives as cancellation.
 - R10 Never block the event loop: it is the Backend's. Run blocking I/O or CPU-heavy work through
@@ -55,7 +57,9 @@ __all__ = [
     "ContractViolation",
     "InvocationContext",
     "McpEndpoint",
+    "Memory",
     "Message",
+    "Note",
     "Peer",
     "PluginAPI",
     "PluginConfigError",
@@ -105,6 +109,43 @@ class McpEndpoint:
     token: str
 
 
+@dataclass(frozen=True)
+class Note:
+    """One memory note of a (user, agent) scope."""
+
+    id: int
+    kind: str
+    text: str
+    created_at: str
+    score: float | None = None
+    """Vector search: cosine distance (lower is closer). Keyword search: bm25 (lower is better). Else None."""
+
+
+class Memory(Protocol):
+    """Notes of one (user, agent) scope, kept by the Backend across turns and tasks.
+
+    The Backend only stores and ranks notes; what to save, when, and what reaches the model is the
+    plugin's decision. Embeddings are computed by the plugin (any model, any dimension).
+    """
+
+    async def save(self, text: str, kind: str = "note", embedding: Sequence[float] | None = None) -> int:
+        """Store a note; returns its id. `ValueError` for empty `text`/`kind` or an empty embedding."""
+        ...
+
+    async def search(self, query: str, limit: int = 5, embedding: Sequence[float] | None = None) -> list[Note]:
+        """With `embedding`: nearest notes by cosine distance among this scope's notes whose embedding
+        has the same dimension. Without: FTS5 keyword match on `query`. Best first."""
+        ...
+
+    async def recent(self, limit: int = 10) -> list[Note]:
+        """Newest first."""
+        ...
+
+    async def delete(self, note_id: int) -> bool:
+        """False if the note does not exist or belongs to another scope."""
+        ...
+
+
 class InvocationContext(Protocol):
     """Everything one turn knows, plus the only ways to report progress. Built by the Backend."""
 
@@ -118,8 +159,10 @@ class InvocationContext(Protocol):
     peers: list[Peer]
     """Every other registered agent."""
     mcp: McpEndpoint
+    memory: Memory
+    """This user's notes for the invoked agent (R1). The plugin cannot choose another scope."""
     max_steps: int
-    """Budget of model calls for this turn (R7)."""
+    """Budget of assistant steps for this turn (R7)."""
 
     async def emit_assistant(self, content: str, tool_calls: Sequence[ToolCall] = ()) -> None:
         """Record one assistant step. A step without tool calls that ends the turn is the answer."""

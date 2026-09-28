@@ -93,3 +93,23 @@ CREATE TABLE IF NOT EXISTS reports (
   created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS ix_rp_user ON reports(user_id, created_at);
+
+-- Agent memory (agent-freedom spec §2): notes of one (user_id, agent) scope. The plugin decides
+-- what to save; embeddings are its own (any model, any dimension; NULL = none).
+CREATE TABLE IF NOT EXISTS memories (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id     TEXT NOT NULL REFERENCES users(id),
+  agent       TEXT NOT NULL,
+  kind        TEXT NOT NULL,
+  text        TEXT NOT NULL,
+  embedding   BLOB,                           -- float32 little-endian (sqlite_vec.serialize_float32)
+  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS ix_memories_scope ON memories(user_id, agent, id);
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(text, content='memories', content_rowid='id');
+CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+  INSERT INTO memories_fts(rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+  INSERT INTO memories_fts(memories_fts, rowid, text) VALUES ('delete', old.id, old.text);
+END;

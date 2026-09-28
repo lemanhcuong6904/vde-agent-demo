@@ -1,12 +1,13 @@
 [project]
 name = "vdagent-insight"
 version = "0.1.0"
-description = "vdagent insight agent plugin (LiteLLM tool loop)"
+description = "vdagent insight agent plugin (LangChain agent with memory)"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "vdagent-sdk",
   "python-dotenv>=1.0",
-  "litellm>=1.50",
+  "langchain>=1.4",
+  "langchain-openai>=1.6",
   "mcp>=1.9",
 ]
 
