@@ -6,6 +6,7 @@ Every read is scoped by the owning user (I4): another user's id reads exactly li
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -13,6 +14,102 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from vdagent_backend.ids import new_id
+
+
+def _canonical_chart_spec(chart_spec: dict[str, Any], dataset_hash: str, title: str) -> tuple[str, str]:
+    """Return the stable JSON payload and its content address."""
+    spec_json = json.dumps(chart_spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    material = json.dumps(
+        {"chart_spec": chart_spec, "dataset_hash": dataset_hash, "title": title},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return spec_json, hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _chart_spec_row(row: Any) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "version": row.version,
+        "status": row.status,
+        "title": row.title,
+        "chart_spec": json.loads(row.chart_spec_json),
+        "dataset_hash": row.dataset_hash,
+        "content_hash": row.content_hash,
+        "created_at": row.created_at,
+    }
+
+
+async def insert_chart_spec(
+    db: AsyncEngine,
+    *,
+    user_id: str,
+    invocation_id: str,
+    title: str,
+    chart_spec: dict[str, Any],
+    idempotency_key: str,
+    dataset_hash: str,
+) -> dict[str, Any]:
+    """Persist one immutable ChartSpec, returning a previous exact retry.
+
+    `idempotency_key` is scoped to an owner.  Reusing it for different content
+    fails instead of silently replacing a previously rendered chart.
+    """
+    if not idempotency_key.strip():
+        raise ValueError("idempotency key must not be empty")
+    spec_json, content_hash = _canonical_chart_spec(chart_spec, dataset_hash, title)
+    async with db.begin() as conn:
+        existing = (
+            await conn.execute(
+                text(
+                    "SELECT id, version, status, title, chart_spec_json, dataset_hash, content_hash, created_at"
+                    " FROM chart_specs WHERE user_id = :user_id AND idempotency_key = :idempotency_key"
+                ),
+                {"user_id": user_id, "idempotency_key": idempotency_key},
+            )
+        ).first()
+        if existing is not None:
+            if existing.content_hash != content_hash:
+                raise ValueError("idempotency key already belongs to different chart content")
+            return _chart_spec_row(existing)
+
+        chart_spec_id = new_id("csp")
+        await conn.execute(
+            text(
+                "INSERT INTO chart_specs (id, user_id, invocation_id, idempotency_key, title, chart_spec_json,"
+                " dataset_hash, content_hash) VALUES (:id, :user_id, :invocation_id, :idempotency_key, :title,"
+                " :chart_spec_json, :dataset_hash, :content_hash)"
+            ),
+            {
+                "id": chart_spec_id,
+                "user_id": user_id,
+                "invocation_id": invocation_id,
+                "idempotency_key": idempotency_key,
+                "title": title,
+                "chart_spec_json": spec_json,
+                "dataset_hash": dataset_hash,
+                "content_hash": content_hash,
+            },
+        )
+    saved = await get_chart_spec(db, user_id, chart_spec_id)
+    assert saved is not None
+    return saved
+
+
+async def get_chart_spec(db: AsyncEngine, user_id: str, chart_spec_id: str) -> dict[str, Any] | None:
+    """Read an immutable chart spec only when it belongs to `user_id`."""
+    async with db.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT id, version, status, title, chart_spec_json, dataset_hash, content_hash, created_at"
+                    " FROM chart_specs WHERE id = :id AND user_id = :user_id"
+                ),
+                {"id": chart_spec_id, "user_id": user_id},
+            )
+        ).first()
+    return None if row is None else _chart_spec_row(row)
 
 
 async def insert_dataset(

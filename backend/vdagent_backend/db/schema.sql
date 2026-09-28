@@ -84,6 +84,24 @@ CREATE TABLE IF NOT EXISTS charts (
   created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
+-- Immutable Chart Agent output.  A retry with the same owner/key returns this
+-- exact version; changing its content requires a new idempotency key.
+CREATE TABLE IF NOT EXISTS chart_specs (
+  id              TEXT PRIMARY KEY,           -- 'csp_…'
+  user_id         TEXT NOT NULL REFERENCES users(id),
+  invocation_id   TEXT NOT NULL REFERENCES invocations(id),
+  idempotency_key TEXT NOT NULL,
+  version         INTEGER NOT NULL DEFAULT 1 CHECK (version = 1),
+  status          TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('ready','failed')),
+  title           TEXT NOT NULL,
+  chart_spec_json TEXT NOT NULL,
+  dataset_hash    TEXT NOT NULL,
+  content_hash    TEXT NOT NULL,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(user_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS ix_chart_specs_user ON chart_specs(user_id, created_at);
+
 CREATE TABLE IF NOT EXISTS reports (
   id            TEXT PRIMARY KEY,             -- 'rp_…'
   user_id       TEXT NOT NULL REFERENCES users(id),
