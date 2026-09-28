@@ -4,6 +4,7 @@ Status: implemented · Date: 2026-09-26
 Supersedes: `2026-09-24-agent-connect-direction-design.md` (entirely).
 Amends: `2026-09-24-vdagent-design.md` (D8, D12, D13, §2, §4.1, §4.3, §4.4, §4.6, §4.7, §5, §10,
 §11, §12, §13) and `2026-09-24-agent-template-design.md` (host, contract, entrypoint, env loading).
+Amended by: `2026-09-28-agent-freedom-design.md` (rules R1 and R7, `ctx.memory`).
 
 ## 1. Purpose and scope
 

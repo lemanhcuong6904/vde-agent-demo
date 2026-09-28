@@ -9,6 +9,7 @@ their `setup(api, opts)` (like Neovim / lazy.nvim), and runs their turns in its 
 - Design: [`docs/superpowers/specs/2026-09-24-vdagent-design.md`](docs/superpowers/specs/2026-09-24-vdagent-design.md)
 - Agent template design: [`docs/superpowers/specs/2026-09-24-agent-template-design.md`](docs/superpowers/specs/2026-09-24-agent-template-design.md)
 - Agents as plugins: [`docs/superpowers/specs/2026-09-26-agent-plugins-design.md`](docs/superpowers/specs/2026-09-26-agent-plugins-design.md)
+- Agents beyond a ReAct loop: [`docs/superpowers/specs/2026-09-28-agent-freedom-design.md`](docs/superpowers/specs/2026-09-28-agent-freedom-design.md)
 - Building an agent plugin: [`agents/_template/README.md`](agents/_template/README.md)
 
 ## Prerequisites
@@ -42,8 +43,8 @@ plugins:
   or more agents (`api.register_agent(name=…, description=…, agent=…)`) and optional shutdown hooks.
 - Plugins depend only on `vdagent_sdk` (`sdk/`), which defines the interface the Backend expects:
   `Agent` (`invoke(ctx)`, `compact(...)`), `InvocationContext`, `PluginAPI`, and the turn rules
-  R1–R11 in its docstring. How an agent thinks (framework, model, tool loop, MCP client) is up to
-  the plugin.
+  R1–R11 in its docstring. How an agent thinks (framework, model, tool loop, MCP client, memory) is
+  up to the plugin; see [Agents are different programs](#agents-are-different-programs).
 - **A plugin that fails to load** (import error, missing setting, bad registration) is logged as
   `plugin <module> failed: …` and skipped; the Backend starts with the others. Its agent is absent
   from the UI and from every other agent's peer list.
@@ -51,6 +52,21 @@ plugins:
   must not write `os.environ` (R11).
 - To add one: copy `agents/_template` (see its README), add the folder to the workspace in the
   root `pyproject.toml`, `uv sync`, and list its module under `plugins:`.
+
+## Agents are different programs
+
+The Backend runs every agent through the same `invoke(ctx)`; what happens inside is the agent
+team's choice. Three agents are plain ReAct loops, two are not:
+
+| Agent | Built with | Beyond a ReAct loop | What the Backend sees |
+|---|---|---|---|
+| orchestrator, data, compare | LiteLLM tool loop | nothing | assistant steps, tool results |
+| insight | LangChain `create_agent` + middleware | recalls earlier findings by vector search, extracts and saves new ones, skips near-duplicates ([README](agents/insight/README.md)) | the same, plus `ctx.memory` rows |
+| report | LangGraph `StateGraph` | every draft is judged by Jev, a decisions model (not a chat model); one revision edge driven by its typed verdict ([README](agents/report/README.md)) | only the final, assessed answer |
+
+Agent memory lives in `backend.db` (`memories`, keyword search via FTS5, vector search via
+sqlite-vec), scoped to one user and one agent. The Backend stores and ranks notes; the agent
+computes the embeddings and decides what to save and recall (`ctx.memory`, SDK rule R1).
 
 ## Environment variables
 
@@ -70,8 +86,11 @@ images; commit changes to the `.env.example` next to it instead.
 | `OPENAI_BASE_URL` | yes | — | Base URL of an OpenAI-compatible endpoint, e.g. `https://…/v1`. |
 | `LLM_MODEL` | yes | — | Model name served by that endpoint. It **must support tool calling**. |
 | `LLM_TIMEOUT_S` | no | `120` | Timeout per LLM call, in seconds (must be > 0). |
+| `EMBED_MODEL` | no (insight only) | `openai/text-embedding-3-small` | Embedding model for insight's memory, on the same endpoint. |
+| `JUDGE_MODEL` | no (report only) | `typesafe/jev-1.13` | Jev model for report's quality gate, called with `OPENAI_API_KEY`. |
+| `JEV_DECISIONS_URL` | no (report only) | `https://openrouter.ai/api/alpha/decisions` | Decisions endpoint serving Jev. |
 
-The five agents need the same variables. They may share one model or each use their own.
+The five agents need the same required variables. They may share one model or each use their own.
 
 - **Who reads it:** each plugin reads its own file in `setup()` with `dotenv_values()`; nothing is
   loaded into the Backend's `os.environ`, so plugins cannot see or overwrite each other's keys.
@@ -92,7 +111,7 @@ over the file.
 | `VDAGENT_WAREHOUSE_DB` | `./var/warehouse.db` | Warehouse SQLite file. |
 | `VDAGENT_FRONTEND_DIST` | `./frontend/dist` | Built frontend, served at `/` if it exists. |
 | `VDAGENT_MAX_DEPTH` | `4` | Maximum agent-call depth. |
-| `VDAGENT_MAX_STEPS` | `12` | LLM calls per turn (`ctx.max_steps`). |
+| `VDAGENT_MAX_STEPS` | `12` | Assistant steps per turn (`ctx.max_steps`). |
 | `VDAGENT_CONFIG` | `backend/config.yaml` | Which YAML to load. Set it in the shell: it has no effect inside `backend/.env`, which is looked up next to the chosen config file. |
 
 `HOST` (for `make backend HOST=0.0.0.0`) is a make variable, not an environment setting: it is the

@@ -70,7 +70,9 @@ class MemoryMiddleware(AgentMiddleware):
         try:
             inbound = self._inbound()
             vector = await self._embeddings.aembed_query(inbound)
-            self._recall = render_recall(await self._ctx.memory.search(inbound, RECALL_LIMIT, embedding=vector))
+            notes = await self._ctx.memory.search(inbound, RECALL_LIMIT, embedding=vector)
+            self._recall = render_recall(notes)
+            log.info("memory: recalled %s", [(n.id, round(n.score or 0.0, 3)) for n in notes] or "nothing")
         except asyncio.CancelledError:
             raise
         except Exception as exc:

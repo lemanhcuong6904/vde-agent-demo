@@ -53,7 +53,7 @@ agent keeps no state between turns.
 
 Plugins share the Backend's process, so **never write `os.environ`** (rule R11): read your own
 `agents/<name>/.env` with `dotenv.dotenv_values()` inside `setup()` and pass the values to your
-agent. The LiteLLM agents overlay the file on the process environment (`settings.read_env()`), so
+agent. The bundled agents overlay the file on the process environment (`settings.read_env()`), so
 the file wins. Raise `vdagent_sdk.PluginConfigError` for a missing or bad setting: the Backend logs
 `plugin vdagent_<name> failed: <message>` and starts without your agent.
 
@@ -89,7 +89,8 @@ already took. `api` is only valid while `setup` runs.
 | `history` | Uncompacted messages as OpenAI chat dicts; the last one is the inbound `[from: <sender>] …` message. |
 | `peers` | Every other registered agent (`name`, `description`). |
 | `mcp` | `url` + `token` of the Backend's MCP server (streamable HTTP, `Authorization: Bearer <token>`). |
-| `max_steps` | Budget of LLM calls for this turn. |
+| `max_steps` | Budget of assistant steps for this turn. |
+| `memory` | This user's notes for your agent, kept by the Backend across tasks: `save(text, kind, embedding=None)`, `search(query, limit, embedding=None)` (keyword, or cosine nearest when you pass your own embedding), `recent(limit)`, `delete(id)`. What to remember and what reaches the model is yours to decide. |
 | `await emit_assistant(content, tool_calls=())` | Record one assistant step (persisted and shown in the UI before it returns). |
 | `await emit_tool_result(tool_call_id, content)` | Record one tool result. |
 | `await call_agent(tool_call_id, target, message) -> str` | Ask another agent for a `send_to_agent` tool call; returns its reply or `error: …`. |
@@ -114,13 +115,13 @@ sequenceDiagram
 
 | # | Rule | Checked by the Backend |
 |---|---|:-:|
-| R1 | No memory between turns: `summary` + `history` is the whole truth. | |
+| R1 | No hidden memory between turns: `summary`, `history` and `memory` are the whole truth. | |
 | R2 | Emit an assistant step (with its tool calls) before any result or `call_agent` for them. A new step only once every call of the previous step has a result. Tool-call ids non-empty and unique in a step. | ✓ |
 | R3 | Every tool call gets exactly one `emit_tool_result` — including `send_to_agent`: `call_agent`, then emit its reply. | ✓ |
 | R4 | `call_agent` only for an unresolved `send_to_agent` call of the latest step, once per id; no result for that id while its call is pending. | ✓ |
 | R5 | When `invoke` returns, every call is resolved and the last step has no tool calls — its content is the final answer. Nothing may be emitted afterwards. | ✓ |
 | R6 | Tool failures become result content `error: …`; the turn continues. Model timeout → raise `AgentTimeoutError` (reported as `DEADLINE_EXCEEDED`). Anything else raised fails the turn (`INTERNAL`). | mapping ✓ |
-| R7 | At most `ctx.max_steps` LLM calls. | |
+| R7 | At most `ctx.max_steps` assistant steps. Internal model calls (embeddings, extraction, judges) are your own budget. | |
 | R8 | One agent object serves concurrent turns: keep per-turn state off `self`. | |
 | R9 | Never swallow `asyncio.CancelledError` (the user cancelled the task, or the Backend is stopping). | |
 | R10 | Never block the event loop — it is the Backend's. Use `asyncio.to_thread` for blocking work. | |
@@ -144,92 +145,26 @@ Local tools are fine, with these rules:
 2. Anything the user or another agent must reference (`ds_…`, `ch_…`, `rp_…`) must be created
    through MCP. Never open `warehouse.db` or `backend.db` directly — that bypasses read-only access
    and per-user ownership.
-3. No per-user state across turns.
+3. Per-user state across turns only in `ctx.memory`.
 4. Apply your own timeout (the Backend has no per-turn deadline; MCP calls use 30 s).
-5. Never name a tool `send_to_agent`; avoid MCP tool names; truncate large results (the LiteLLM
+5. Never name a tool `send_to_agent`; avoid MCP tool names; truncate large results (the bundled
    agents cut at 16 000 chars and append `…[truncated]`).
 
 ## Recipes
 
-> **Unexecuted sketches.** They show where each framework plugs into the contract; check them
-> against the framework's current docs and let tests that drive `invoke` with a recording `ctx` prove your version.
+### LangChain v1 (`create_agent`) and LangGraph
 
-### LangChain v1 / LangGraph (`create_agent`)
-
-Emit from inside the graph (middleware), not from a stream consumer, so R2 ordering cannot lag
-execution: `aafter_model` runs before the model's tool calls execute, `awrap_tool_call` right
-after each one.
-
-```python
-import json
-from typing import Annotated
-
-from langchain.agents import create_agent
-from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import ToolMessage
-from langchain_core.tools import InjectedToolCallId, tool
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_openai import ChatOpenAI
-
-from vdagent_sdk import SEND_TO_AGENT, AgentTimeoutError, InvocationContext, Message, ToolCall
-
-
-class EmitToContext(AgentMiddleware):
-    def __init__(self, ctx: InvocationContext) -> None:
-        super().__init__()
-        self.ctx = ctx
-
-    async def aafter_model(self, state, runtime):
-        ai = state["messages"][-1]
-        calls = [ToolCall(tc["id"], tc["name"], json.dumps(tc["args"])) for tc in ai.tool_calls]
-        await self.ctx.emit_assistant(ai.text, calls)
-
-    async def awrap_tool_call(self, request, handler):
-        try:
-            result = await handler(request)
-            content = str(result.content)
-        except Exception as exc:  # R6: tool failures go back to the model
-            content = f"error: {exc}"
-            result = ToolMessage(content, tool_call_id=request.tool_call["id"])
-        await self.ctx.emit_tool_result(request.tool_call["id"], content)
-        return result
-
-
-def send_to_agent(ctx: InvocationContext):
-    roster = "\n".join(f"- {p.name}: {p.description}" for p in ctx.peers)
-
-    @tool(SEND_TO_AGENT, description=f"Send a message to another agent and wait for its reply. Agents:\n{roster}")
-    async def _send(agent: str, message: str, tool_call_id: Annotated[str, InjectedToolCallId]) -> str:
-        return await ctx.call_agent(tool_call_id, agent, message)
-
-    return _send
-
-
-class LangChainAgent:
-    def __init__(self, model: ChatOpenAI, system_prompt: str) -> None:
-        self.model, self.system_prompt = model, system_prompt
-
-    async def invoke(self, ctx: InvocationContext) -> None:
-        mcp = MultiServerMCPClient({"backend": {
-            "transport": "streamable_http", "url": ctx.mcp.url,
-            "headers": {"Authorization": f"Bearer {ctx.mcp.token}"},
-        }})
-        tools = [*await mcp.get_tools(), send_to_agent(ctx)]
-        graph = create_agent(self.model, tools, system_prompt=f"{self.system_prompt}\n\n{ctx.summary}",
-                             middleware=[EmitToContext(ctx)])   # built per turn: ctx is per turn (R8)
-        try:
-            await graph.ainvoke({"messages": ctx.history},     # OpenAI-shaped dicts are accepted
-                                {"recursion_limit": 2 * ctx.max_steps + 1})
-        except TimeoutError as exc:                             # map your client's timeout error
-            raise AgentTimeoutError(str(exc)) from exc
-
-    async def compact(self, previous_summary: str, messages: list[Message]) -> str: ...
-```
-
-If the recursion limit is hit, the graph raises before a final step: catch it and emit a final
-assistant step without tool calls yourself (R5).
+Working, tested examples: [`agents/insight`](../insight/README.md) (LangChain `create_agent`; its
+`CtxBridge` middleware in `bridge.py` maps the loop onto the contract, `MemoryMiddleware` in
+`memory.py` uses `ctx.memory`) and [`agents/report`](../report/README.md) (a hand-built LangGraph
+`StateGraph` in `graph.py`). `langchain-mcp-adapters` cannot be used: it requires `mcp<2`, and every
+plugin shares the Backend's environment (mcp 2.x). Wrap your own MCP client's tools instead
+(`agents/insight/vdagent_insight/tools.py`).
 
 ### OpenAI Agents SDK
+
+> **Unexecuted sketch.** It shows where the framework plugs into the contract; check it against
+> the framework's current docs and let tests that drive `invoke` with a recording `ctx` prove your version.
 
 Emit from run hooks: `on_llm_end` sees one whole model response (all its tool calls together,
 which is one assistant step), `on_tool_end` gets a `ToolContext` with the `tool_call_id`.

@@ -1,6 +1,6 @@
 # vdagent — Agents Are More Than a ReAct Loop — Design Spec
 
-Status: draft, awaiting review · Date: 2026-09-28
+Status: implemented · Date: 2026-09-28
 Amends: `2026-09-26-agent-plugins-design.md` (SDK rules R1 and R7, `InvocationContext`, schema).
 
 ## 1. Purpose and scope
@@ -86,8 +86,9 @@ class Memory(Protocol):
 
 class InvocationContext(Protocol):
     ...
-    memory: Memory
-    """Scoped to (user_id, the invoked agent). The plugin cannot choose another scope."""
+    @property
+    def memory(self) -> Memory:
+        """Scoped to (user_id, the invoked agent). The plugin cannot choose another scope."""
 ```
 
 `save` rejects empty `text`/`kind` and empty embeddings with `ValueError`. `Note`, `Memory` are
@@ -155,9 +156,10 @@ Maps LangChain's loop onto the contract:
 
 - `abefore_agent`: embed the inbound message (`ctx.history[-1]`) with `OpenAIEmbeddings(model=
   EMBED_MODEL)` via OpenRouter; `ctx.memory.search(text, 5, embedding=v)`. If any notes come back,
-  prepend one `SystemMessage` to the input messages (after the system prompt, before the history):
-  "What you already found for this user (earlier tasks)", one line per note with its date.
-  Findings keep their dataset ids.
+  append a "What you already found for this user (earlier tasks)" block to the system prompt of
+  every model call of the turn (`awrap_model_call`; a mid-conversation `SystemMessage` is rejected
+  by some providers), one line per note with its date. Findings keep their dataset ids. The
+  recalled note ids and distances are logged.
 - `aafter_agent`: one extraction call with `prompts/extract.md` (inbound request + final answer →
   JSON list of at most 3 durable, self-contained findings, `[]` if none). For each finding, embed it,
   `search(text, 1, embedding=v)`; if the nearest note is closer than cosine distance `0.1`, skip it,
