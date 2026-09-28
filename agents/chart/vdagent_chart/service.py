@@ -31,9 +31,15 @@ class ChartAgentService:
         validate_input(task, resolved, policy)
         refs: list[str] = []
         targets: list[TargetResult] = []
+        errors: list[dict[str, str]] = []
         for target in task.visual_targets:
-            decision = select_chart(target, policy)
-            dataset = assemble_dataset(target, resolved, decision)
+            try:
+                decision = select_chart(target, policy)
+                dataset = assemble_dataset(target, resolved, decision)
+            except ChartError as exc:
+                targets.append(TargetResult(target.target_id, "failed", reason_code=exc.code))
+                errors.append({"target_id": target.target_id, "code": exc.code, "message": exc.message})
+                continue
             title = f"{target.visual_question.replace('_', ' ').title()} — VHop"
             presentation = build_presentation(title, f"Snapshot {task.scope.snapshot_id or 'n/a'}")
             render_spec = build_vega_spec(decision["chart_type"], dataset["records"], presentation["title"])
@@ -43,4 +49,13 @@ class ChartAgentService:
             self.artifacts[chart_id] = {"artifact_id": chart_id, "version": 1, "status": "validated", **content, "content_hash": content_hash, "selection": decision, "presentation": presentation}
             refs.append(f"{chart_id}@1")
             targets.append(TargetResult(target.target_id, "success", f"{chart_id}@1"))
-        return ChartTaskResult("chart-result/2.0", task.run_id, task.task_id, "success", tuple(refs), tuple(targets))
+        status = "success" if not errors else "partial" if refs else "failed"
+        return ChartTaskResult(
+            "chart-result/2.0",
+            task.run_id,
+            task.task_id,
+            status,
+            tuple(refs),
+            tuple(targets),
+            errors=tuple(errors),
+        )
