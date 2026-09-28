@@ -162,3 +162,24 @@ async def test_artifacts_are_owner_scoped_and_dataset_rows_page(client: httpx.As
     assert (await client.get("/api/reports", headers=B)).json() == []
     assert (await client.get(f"/api/reports/{report}", headers=B)).status_code == 404
     assert (await client.get(f"/api/reports/{report}", headers=A)).json()["markdown"] == "# hi"
+
+
+async def test_chart_spec_endpoint_returns_an_immutable_owner_scoped_artifact(client: httpx.AsyncClient) -> None:
+    task_id = (await client.post("/api/agents/data/messages", json={"content": "x"}, headers=A)).json()["task_id"]
+    await wait_for(lambda: _task_status(client, task_id))
+    invocation_id = (await client.get(f"/api/tasks/{task_id}", headers=A)).json()["invocations"][0]["id"]
+    chart = await artifacts.insert_chart_spec(
+        client.app.state.services.db,  # type: ignore[attr-defined]
+        user_id=ALICE,
+        invocation_id=invocation_id,
+        title="Price trend",
+        chart_spec={"mark": "line"},
+        idempotency_key="api-chart-spec",
+        dataset_hash="sha256:dataset",
+    )
+
+    response = await client.get(f"/api/chart-specs/{chart['id']}", headers=A)
+    assert response.status_code == 200
+    assert response.json()["chart_spec"] == {"mark": "line"}
+    assert response.json()["version"] == 1
+    assert (await client.get(f"/api/chart-specs/{chart['id']}", headers=B)).status_code == 404

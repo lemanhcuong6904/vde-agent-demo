@@ -148,6 +148,14 @@ async def get_chart(svc: Svc, user_id: UserId, chart_id: str) -> dict[str, Any]:
     return chart
 
 
+@router.get("/chart-specs/{chart_spec_id}")
+async def get_chart_spec(svc: Svc, user_id: UserId, chart_spec_id: str) -> dict[str, Any]:
+    chart_spec = await artifacts.get_chart_spec(svc.db, user_id, chart_spec_id)
+    if chart_spec is None:
+        raise not_found("chart spec")
+    return chart_spec
+
+
 @router.get("/reports")
 async def list_reports(svc: Svc, user_id: UserId) -> list[dict[str, Any]]:
     return await artifacts.list_reports(svc.db, user_id)
