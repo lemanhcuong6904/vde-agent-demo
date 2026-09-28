@@ -1,0 +1,16 @@
+# Reproducible local development environment for the VDAgent workspace.
+# Install after activating a Python 3.12 virtual environment:
+#   python -m pip install -r requirements.txt
+
+-e ./sdk
+-e ./backend
+-e ./agents/_template
+-e ./agents/orchestrator
+-e ./agents/data
+-e ./agents/compare
+-e ./agents/insight
+-e ./agents/report
+
+pytest>=8
+pytest-asyncio>=0.24
+httpx>=0.27
