@@ -1,9 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import type { VisualizationSpec } from "vega-embed";
+import type { ChartSpecDTO } from "../../api/types";
 import { useChart, useChartSpec } from "../../api/queries";
 import { ArtifactLink } from "../ArtifactLink";
 
 /** Vega-Lite chart (`GET /api/charts/{id}`) rendered with vega-embed (loaded lazily). */
+export function chartSpecMetadata(
+  chart: Pick<ChartSpecDTO, "lineage" | "limitations">,
+): string[] {
+  const refs = chart.lineage.input_artifact_refs;
+  const sourceCount = Array.isArray(refs) ? refs.length : 0;
+  const sourceLabel = `${sourceCount} input artifact${sourceCount === 1 ? "" : "s"}`;
+  return [sourceLabel, ...chart.limitations.map((limitation) => `Limitation: ${limitation}`)];
+}
+
 export function ChartView({ id }: { id: string }) {
   const isImmutable = id.startsWith("csp_");
   const legacyQuery = useChart(id);
@@ -47,7 +57,9 @@ export function ChartView({ id }: { id: string }) {
         <span className="mono artifact-id">{id}</span>
         <span className="chart-title">{query.data?.title}</span>
         {isImmutable ? (
-          <span className="muted small">immutable ChartSpec</span>
+          <span className="muted small">
+            {immutableQuery.data && chartSpecMetadata(immutableQuery.data).join(" · ")}
+          </span>
         ) : (
           <span className="muted small">
             from <ArtifactLink id={legacyQuery.data!.dataset_id} />

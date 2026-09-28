@@ -16,11 +16,25 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from vdagent_backend.ids import new_id
 
 
-def _canonical_chart_spec(chart_spec: dict[str, Any], dataset_hash: str, title: str) -> tuple[str, str]:
+def _canonical_chart_spec(
+    chart_spec: dict[str, Any],
+    dataset_hash: str,
+    title: str,
+    lineage: dict[str, Any],
+    validation: dict[str, Any],
+    limitations: list[str],
+) -> tuple[str, str]:
     """Return the stable JSON payload and its content address."""
     spec_json = json.dumps(chart_spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     material = json.dumps(
-        {"chart_spec": chart_spec, "dataset_hash": dataset_hash, "title": title},
+        {
+            "chart_spec": chart_spec,
+            "dataset_hash": dataset_hash,
+            "title": title,
+            "lineage": lineage,
+            "validation": validation,
+            "limitations": limitations,
+        },
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -36,6 +50,9 @@ def _chart_spec_row(row: Any) -> dict[str, Any]:
         "title": row.title,
         "chart_spec": json.loads(row.chart_spec_json),
         "dataset_hash": row.dataset_hash,
+        "lineage": json.loads(row.lineage_json),
+        "validation": json.loads(row.validation_json),
+        "limitations": json.loads(row.limitations_json),
         "content_hash": row.content_hash,
         "created_at": row.created_at,
     }
@@ -50,6 +67,9 @@ async def insert_chart_spec(
     chart_spec: dict[str, Any],
     idempotency_key: str,
     dataset_hash: str,
+    lineage: dict[str, Any] | None = None,
+    validation: dict[str, Any] | None = None,
+    limitations: list[str] | None = None,
 ) -> dict[str, Any]:
     """Persist one immutable ChartSpec, returning a previous exact retry.
 
@@ -58,12 +78,18 @@ async def insert_chart_spec(
     """
     if not idempotency_key.strip():
         raise ValueError("idempotency key must not be empty")
-    spec_json, content_hash = _canonical_chart_spec(chart_spec, dataset_hash, title)
+    lineage = lineage or {}
+    validation = validation or {}
+    limitations = limitations or []
+    spec_json, content_hash = _canonical_chart_spec(
+        chart_spec, dataset_hash, title, lineage, validation, limitations
+    )
     async with db.begin() as conn:
         existing = (
             await conn.execute(
                 text(
-                    "SELECT id, version, status, title, chart_spec_json, dataset_hash, content_hash, created_at"
+                    "SELECT id, version, status, title, chart_spec_json, dataset_hash, lineage_json, validation_json,"
+                    " limitations_json, content_hash, created_at"
                     " FROM chart_specs WHERE user_id = :user_id AND idempotency_key = :idempotency_key"
                 ),
                 {"user_id": user_id, "idempotency_key": idempotency_key},
@@ -78,8 +104,9 @@ async def insert_chart_spec(
         await conn.execute(
             text(
                 "INSERT INTO chart_specs (id, user_id, invocation_id, idempotency_key, title, chart_spec_json,"
-                " dataset_hash, content_hash) VALUES (:id, :user_id, :invocation_id, :idempotency_key, :title,"
-                " :chart_spec_json, :dataset_hash, :content_hash)"
+                " dataset_hash, lineage_json, validation_json, limitations_json, content_hash)"
+                " VALUES (:id, :user_id, :invocation_id, :idempotency_key, :title, :chart_spec_json,"
+                " :dataset_hash, :lineage_json, :validation_json, :limitations_json, :content_hash)"
             ),
             {
                 "id": chart_spec_id,
@@ -89,6 +116,9 @@ async def insert_chart_spec(
                 "title": title,
                 "chart_spec_json": spec_json,
                 "dataset_hash": dataset_hash,
+                "lineage_json": json.dumps(lineage, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+                "validation_json": json.dumps(validation, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+                "limitations_json": json.dumps(limitations, ensure_ascii=False, separators=(",", ":")),
                 "content_hash": content_hash,
             },
         )
@@ -103,7 +133,8 @@ async def get_chart_spec(db: AsyncEngine, user_id: str, chart_spec_id: str) -> d
         row = (
             await conn.execute(
                 text(
-                    "SELECT id, version, status, title, chart_spec_json, dataset_hash, content_hash, created_at"
+                    "SELECT id, version, status, title, chart_spec_json, dataset_hash, lineage_json, validation_json,"
+                    " limitations_json, content_hash, created_at"
                     " FROM chart_specs WHERE id = :id AND user_id = :user_id"
                 ),
                 {"id": chart_spec_id, "user_id": user_id},

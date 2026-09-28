@@ -24,6 +24,20 @@ def apply_schema(path: str) -> None:
     with sqlite3.connect(path) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA_PATH.read_text())
+        _upgrade_chart_specs(conn)
+
+
+def _upgrade_chart_specs(conn: sqlite3.Connection) -> None:
+    """Add audit metadata to databases created before immutable ChartSpec v2."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(chart_specs)")}
+    additions = {
+        "lineage_json": "TEXT NOT NULL DEFAULT '{}'",
+        "validation_json": "TEXT NOT NULL DEFAULT '{}'",
+        "limitations_json": "TEXT NOT NULL DEFAULT '[]'",
+    }
+    for name, definition in additions.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE chart_specs ADD COLUMN {name} {definition}")
 
 
 def _set_pragmas(dbapi_conn, _record) -> None:  # noqa: ANN001

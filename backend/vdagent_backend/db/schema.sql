@@ -96,6 +96,9 @@ CREATE TABLE IF NOT EXISTS chart_specs (
   title           TEXT NOT NULL,
   chart_spec_json TEXT NOT NULL,
   dataset_hash    TEXT NOT NULL,
+  lineage_json    TEXT NOT NULL DEFAULT '{}',
+  validation_json TEXT NOT NULL DEFAULT '{}',
+  limitations_json TEXT NOT NULL DEFAULT '[]',
   content_hash    TEXT NOT NULL,
   created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE(user_id, idempotency_key)

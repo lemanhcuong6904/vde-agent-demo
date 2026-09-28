@@ -127,6 +127,9 @@ export interface ChartSpecDTO {
   title: string;
   chart_spec: Record<string, unknown>;
   dataset_hash: string;
+  lineage: Record<string, unknown>;
+  validation: Record<string, unknown>;
+  limitations: string[];
   content_hash: string;
   created_at: string;
 }
