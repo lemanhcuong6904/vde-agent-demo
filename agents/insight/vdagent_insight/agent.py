@@ -1,8 +1,10 @@
-"""This agent's brain: a LangChain 1.x agent (`create_agent`) with the Backend's MCP tools.
+"""This agent's brain: a LangChain 1.x agent (`create_agent`) with the Backend's MCP tools and its
+own long-term memory.
 
-Per turn: open an MCP session, build the tools (MCP + `send_to_agent`) and a fresh agent whose
-middleware maps LangChain's loop onto the turn contract (`CtxBridge`, see bridge.py). LangChain runs
-the loop; the tool calls of one step run concurrently.
+Per turn: open an MCP session, build the tools (MCP + `send_to_agent`) and a fresh agent with two
+middlewares: `MemoryMiddleware` (memory.py) recalls earlier findings into the system prompt and
+saves new ones after the answer; `CtxBridge` (bridge.py) maps LangChain's loop onto the turn
+contract. LangChain runs the loop; the tool calls of one step run concurrently.
 """
 
 from __future__ import annotations
@@ -14,13 +16,15 @@ from pathlib import Path
 
 import openai
 from langchain.agents import create_agent
+from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from vdagent_sdk import Agent, AgentTimeoutError, InvocationContext, Message
 
 from .bridge import STEP_LIMIT_TEXT, CtxBridge
 from .mcp_client import McpSessionFactory, open_mcp_session
+from .memory import MemoryMiddleware
 from .settings import DEFAULT_LLM_TIMEOUT_S, load_settings
 from .tools import build_tools
 
@@ -67,12 +71,16 @@ class LangChainAgent:
         self,
         *,
         model: BaseChatModel,
+        embeddings: Embeddings,
         mcp_session_factory: McpSessionFactory = open_mcp_session,
         system_prompt: str,
         compact_prompt: str,
+        extract_prompt: str,
         timeout_s: float = DEFAULT_LLM_TIMEOUT_S,
     ) -> None:
         self._model = model
+        self._embeddings = embeddings
+        self._extract_prompt = extract_prompt
         self._mcp_session_factory = mcp_session_factory
         self._system_prompt = system_prompt
         self._compact_prompt = compact_prompt
@@ -84,7 +92,10 @@ class LangChainAgent:
                 self._model,
                 build_tools(mcp, await mcp.list_tools(), ctx.peers),
                 system_prompt=build_system_prompt(self._system_prompt, ctx.summary),
-                middleware=[CtxBridge(ctx, self._timeout_s)],
+                middleware=[
+                    MemoryMiddleware(ctx, self._model, self._embeddings, self._extract_prompt),
+                    CtxBridge(ctx, self._timeout_s),
+                ],
             )
             # Each step passes through a few graph nodes; the step budget itself is CtxBridge's.
             await agent.ainvoke({"messages": ctx.history}, {"recursion_limit": 4 * ctx.max_steps + 10})
@@ -113,9 +124,18 @@ def build_agent(env: Mapping[str, str]) -> Agent:
         api_key=settings.openai_api_key,
         timeout=settings.llm_timeout_s,
     )
+    embeddings = OpenAIEmbeddings(
+        model=settings.embed_model,
+        base_url=settings.openai_base_url,
+        api_key=settings.openai_api_key,
+        timeout=settings.llm_timeout_s,
+        check_embedding_ctx_length=False,  # send text, not tiktoken ids: the endpoint is not OpenAI's
+    )
     return LangChainAgent(
         model=model,
+        embeddings=embeddings,
         system_prompt=load_prompt("system"),
         compact_prompt=load_prompt("compact"),
+        extract_prompt=load_prompt("extract"),
         timeout_s=settings.llm_timeout_s,
     )

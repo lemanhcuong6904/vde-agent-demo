@@ -14,14 +14,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import math
+
 import httpx
 import openai
 import pytest
+from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from vdagent_sdk import Agent, AgentTimeoutError, McpEndpoint, Message, Peer, PluginConfigError, ToolCall
+from vdagent_sdk import Agent, AgentTimeoutError, McpEndpoint, Message, Note, Peer, PluginConfigError, ToolCall
 
 from .. import setup
 from ..agent import DESCRIPTION, NAME, STEP_LIMIT_TEXT, LangChainAgent, build_agent
@@ -30,6 +33,7 @@ from ..settings import load_settings, read_env
 
 SYSTEM_PROMPT = "You are the test agent."
 COMPACT_PROMPT = "Summarise the conversation."
+EXTRACT_PROMPT = "Extract durable findings as a JSON list."
 LLM_ENV = {"OPENAI_API_KEY": "k", "OPENAI_BASE_URL": "http://llm", "LLM_MODEL": "m"}
 PEERS = [
     Peer("data", "Queries the warehouse; returns dataset ids."),
@@ -56,6 +60,8 @@ class Recorder:
 
     script: Sequence[Script]
     calls: list[ChatCall] = field(default_factory=list)
+    extract_reply: Script = field(default_factory=lambda: AIMessage("[]"))
+    extract_calls: list[ChatCall] = field(default_factory=list)
 
 
 class ScriptedChat(BaseChatModel):
@@ -70,8 +76,13 @@ class ScriptedChat(BaseChatModel):
 
     def _reply(self, messages: list[BaseMessage], tools: list[dict[str, Any]]) -> ChatResult:
         rec: Recorder = self.rec
-        rec.calls.append(ChatCall(list(messages), tools))
-        entry = rec.script[min(len(rec.calls), len(rec.script)) - 1]
+        call = ChatCall(list(messages), tools)
+        if call.system == EXTRACT_PROMPT:
+            rec.extract_calls.append(call)
+            entry = rec.extract_reply
+        else:
+            rec.calls.append(call)
+            entry = rec.script[min(len(rec.calls), len(rec.script)) - 1]
         if isinstance(entry, Exception):
             raise entry
         message = entry(messages) if callable(entry) else entry.model_copy(update={"id": None})  # fresh, like a model
@@ -93,6 +104,66 @@ def chat(*script: Script) -> tuple[ScriptedChat, Recorder]:
 
 def ai(content: str = "", *calls: tuple[str | None, str, dict[str, Any]]) -> AIMessage:
     return AIMessage(content=content, tool_calls=[{"id": i, "name": n, "args": a, "type": "tool_call"} for i, n, a in calls])
+
+
+class FakeEmbeddings(Embeddings):
+    """`vectors[text]`, else [0, 1]; raises `fail` if set. Records every embedded text."""
+
+    def __init__(self, vectors: dict[str, list[float]] | None = None, fail: Exception | None = None) -> None:
+        self.vectors = vectors or {}
+        self.fail = fail
+        self.texts: list[str] = []
+
+    def embed_query(self, text: str) -> list[float]:
+        self.texts.append(text)
+        if self.fail:
+            raise self.fail
+        return self.vectors.get(text, [0.0, 1.0])
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [self.embed_query(t) for t in texts]
+
+
+def _cosine_distance(a: Sequence[float], b: Sequence[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    return 1.0 - dot / (math.hypot(*a) * math.hypot(*b))
+
+
+@dataclass
+class FakeMemory:
+    """In-process `Memory`: vector search by cosine distance; keyword search unused by this agent."""
+
+    notes: list[tuple[Note, list[float] | None]] = field(default_factory=list)
+    searches: list[tuple[str, list[float] | None]] = field(default_factory=list)
+    fail: Exception | None = None
+
+    def add(self, text: str, embedding: list[float], created_at: str = "2026-09-01T10:00:00Z") -> None:
+        self.notes.append((Note(len(self.notes) + 1, "finding", text, created_at), embedding))
+
+    async def save(self, text: str, kind: str = "note", embedding: Sequence[float] | None = None) -> int:
+        self.notes.append((Note(len(self.notes) + 1, kind, text, "2026-09-28T00:00:00Z"), list(embedding) if embedding else None))
+        return len(self.notes)
+
+    async def search(self, query: str, limit: int = 5, embedding: Sequence[float] | None = None) -> list[Note]:
+        self.searches.append((query, list(embedding) if embedding is not None else None))
+        if self.fail:
+            raise self.fail
+        assert embedding is not None, "this agent always searches by vector"
+        scored = [
+            Note(n.id, n.kind, n.text, n.created_at, _cosine_distance(v, embedding))
+            for n, v in self.notes
+            if v is not None and len(v) == len(embedding)
+        ]
+        return sorted(scored, key=lambda n: n.score or 0.0)[:limit]
+
+    async def recent(self, limit: int = 10) -> list[Note]:
+        return [n for n, _ in reversed(self.notes)][:limit]
+
+    async def delete(self, note_id: int) -> bool:
+        raise AssertionError("this agent never deletes notes")
+
+    def saved(self) -> list[tuple[str, str, list[float] | None]]:
+        return [(n.kind, n.text, v) for n, v in self.notes]
 
 
 @dataclass
@@ -127,6 +198,7 @@ class RecordingContext:
     invocation_id: str = "inv_1"
     task_id: str = "t_1"
     user_id: str = "u_1"
+    memory: FakeMemory = field(default_factory=FakeMemory)
     replies: dict[str, asyncio.Future[str]] = field(default_factory=dict)
     events: list[tuple[str, Any, Any]] = field(default_factory=list)
     calls: list[tuple[str, str, str]] = field(default_factory=list)
@@ -168,9 +240,14 @@ RUN_QUERY = McpTool(
 )
 
 
-def make_agent(model: ScriptedChat, mcp: FakeMcp) -> LangChainAgent:
+def make_agent(model: ScriptedChat, mcp: FakeMcp, embeddings: FakeEmbeddings | None = None) -> LangChainAgent:
     return LangChainAgent(
-        model=model, mcp_session_factory=mcp.factory, system_prompt=SYSTEM_PROMPT, compact_prompt=COMPACT_PROMPT
+        model=model,
+        embeddings=embeddings or FakeEmbeddings(),
+        mcp_session_factory=mcp.factory,
+        system_prompt=SYSTEM_PROMPT,
+        compact_prompt=COMPACT_PROMPT,
+        extract_prompt=EXTRACT_PROMPT,
     )
 
 
@@ -360,6 +437,80 @@ async def test_model_timeout_is_agent_timeout_and_other_failures_propagate() -> 
     broken, _ = chat(RuntimeError("provider returned 500"))
     with pytest.raises(RuntimeError, match="provider returned 500"):
         await make_agent(broken, FakeMcp([], {})).invoke(RecordingContext())
+
+
+# --------------------------------------------------------------------------- memory
+
+INBOUND = "[from: user] revenue by region?"
+
+
+async def test_recalled_notes_are_found_by_the_inbound_embedding_and_reach_every_model_request() -> None:
+    model, rec = chat(ai("", ("q1", "run_query", {"sql": "SELECT 1"})), ai("West fell again."))
+    ctx = RecordingContext()
+    ctx.memory.add("West revenue fell 8% in 2025 (ds_3).", [1.0, 0.0], created_at="2026-09-20T08:00:00Z")
+    ctx.memory.add("Unrelated: staff rota.", [0.0, 1.0])
+    embeddings = FakeEmbeddings({INBOUND: [1.0, 0.0]})
+    mcp = FakeMcp(tools=[RUN_QUERY], handlers={"run_query": lambda a: ToolOutcome("ds_9")})
+    await make_agent(model, mcp, embeddings).invoke(ctx)
+
+    assert ctx.memory.searches[0] == (INBOUND, [1.0, 0.0])
+    for call in rec.calls:
+        assert call.system.startswith(SYSTEM_PROMPT)
+        assert "(2026-09-20) West revenue fell 8% in 2025 (ds_3)." in call.system
+    assert rec.calls[0].system.index("(2026-09-20) West") < rec.calls[0].system.index("Unrelated")  # nearest first
+
+
+async def test_findings_extracted_from_the_answer_are_saved_with_their_embeddings() -> None:
+    model, rec = chat(ai("West fell 8% (ds_3); East grew 12% (ds_4)."))
+    rec.extract_reply = AIMessage('```json\n["West fell 8% in 2025 (ds_3).", "East grew 12% in 2025 (ds_4)."]\n```')
+    embeddings = FakeEmbeddings({"West fell 8% in 2025 (ds_3).": [1.0, 0.0], "East grew 12% in 2025 (ds_4).": [0.6, 0.8]})
+    ctx = RecordingContext()
+    await make_agent(model, FakeMcp([], {}), embeddings).invoke(ctx)
+
+    assert ctx.events[-1] == ("assistant", "West fell 8% (ds_3); East grew 12% (ds_4).", [])
+    (extract,) = rec.extract_calls
+    assert INBOUND in str(extract.messages[1].content)
+    assert "West fell 8% (ds_3); East grew 12% (ds_4)." in str(extract.messages[1].content)
+    assert ctx.memory.saved() == [
+        ("finding", "West fell 8% in 2025 (ds_3).", [1.0, 0.0]),
+        ("finding", "East grew 12% in 2025 (ds_4).", [0.6, 0.8]),
+    ]
+
+
+async def test_near_duplicate_findings_are_not_saved_again() -> None:
+    model, rec = chat(ai("answer"))
+    rec.extract_reply = AIMessage('["West fell 8 percent (ds_3).", "Electronics grew 58% (ds_5)."]')
+    embeddings = FakeEmbeddings({"West fell 8 percent (ds_3).": [1.0, 0.01], "Electronics grew 58% (ds_5).": [0.0, 1.0]})
+    ctx = RecordingContext()
+    ctx.memory.add("West revenue fell 8% in 2025 (ds_3).", [1.0, 0.0])
+    await make_agent(model, FakeMcp([], {}), embeddings).invoke(ctx)
+
+    assert [text for _, text, _ in ctx.memory.saved()] == ["West revenue fell 8% in 2025 (ds_3).", "Electronics grew 58% (ds_5)."]
+
+
+async def test_at_most_three_findings_are_saved_per_turn() -> None:
+    model, rec = chat(ai("answer"))
+    rec.extract_reply = AIMessage(json.dumps([f"finding {i}" for i in range(5)]))
+    embeddings = FakeEmbeddings({f"finding {i}": [math.cos(i), math.sin(i)] for i in range(5)})
+    ctx = RecordingContext()
+    await make_agent(model, FakeMcp([], {}), embeddings).invoke(ctx)
+    assert [text for _, text, _ in ctx.memory.saved()] == ["finding 0", "finding 1", "finding 2"]
+
+
+@pytest.mark.parametrize("failure", ["embeddings", "search", "extraction_json", "extraction_call"])
+async def test_memory_failures_never_fail_the_turn(failure: str) -> None:
+    model, rec = chat(ai("final answer"))
+    rec.extract_reply = {
+        "extraction_json": AIMessage("these are not JSON findings"),
+        "extraction_call": RuntimeError("extractor down"),
+    }.get(failure, AIMessage('["a finding"]'))
+    embeddings = FakeEmbeddings(fail=ConnectionError("embeddings down") if failure == "embeddings" else None)
+    ctx = RecordingContext(memory=FakeMemory(fail=RuntimeError("db locked") if failure == "search" else None))
+    await make_agent(model, FakeMcp([], {}), embeddings).invoke(ctx)
+
+    assert ctx.events == [("assistant", "final answer", [])]
+    assert ctx.memory.saved() == []
+    assert rec.calls[0].system == SYSTEM_PROMPT
 
 
 # --------------------------------------------------------------------------- compaction
