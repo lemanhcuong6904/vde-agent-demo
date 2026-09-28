@@ -73,6 +73,23 @@ class NormalizedArtifact:
 
 
 @dataclass(frozen=True)
+class ResolvedChartContext:
+    task: ChartTaskInput
+    policy: ChartPolicy
+    artifacts: tuple[NormalizedArtifact, ...]
+    validation: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class EvidenceBinding:
+    target_id: str
+    metric_ids: tuple[str, ...] = ()
+    evidence_ids: tuple[str, ...] = ()
+    insight_ids: tuple[str, ...] = ()
+    comparison_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ChartPolicy:
     ruleset_version: str
     allowed_chart_types: tuple[str, ...]
