@@ -15,6 +15,8 @@ class ChartPluginAgent:
 
     async def invoke(self, ctx: InvocationContext) -> None:
         text = str(ctx.history[-1].get("content", "")).strip()
+        if text.startswith("[from:") and "] " in text:
+            text = text.split("] ", 1)[1]
         if not text.startswith("chart demo "):
             await ctx.emit_assistant("Use `chart demo <scenario>`; e.g. `chart demo price_trend`.")
             return
