@@ -19,7 +19,7 @@ their `setup(api, opts)` (like Neovim / lazy.nvim), and runs their turns in its 
 
   ```
   uv sync
-  for a in orchestrator data compare insight report; do cp -n agents/$a/.env.example agents/$a/.env; done
+  for a in orchestrator data compare insight report chart; do cp -n agents/$a/.env.example agents/$a/.env; done
   ```
 
   Then fill in `OPENAI_API_KEY`, `OPENAI_BASE_URL` and `LLM_MODEL` in each `agents/<name>/.env`
@@ -134,6 +134,19 @@ cd frontend && npm install && npm run dev   # another terminal → http://localh
 ```
 
 Changing a plugin's code or `.env` takes effect when the backend restarts.
+
+## Chart Agent demo
+
+The `chart` plugin is enabled in `backend/config.yaml`. It consumes only committed,
+exact-version VHop fixture artifacts and generates validated Vega-Lite ChartSpecs;
+it does not query the warehouse or call upstream agents at runtime. Configure
+`agents/chart/.env` with `LLM_MODEL=gpt-4o-mini` to enable bounded visual-language
+advice. Policy and validators remain authoritative, and provider failures fall back
+to deterministic chart selection.
+
+After `make backend`, select **chart** in the UI and send `chart demo price_trend`.
+See [`agents/chart/README.md`](agents/chart/README.md) for the complete scenario
+matrix, fixture provenance, limitations and test command.
 
 Stop the backend before `make reset-db`: it deletes the SQLite files, and a running backend would
 keep writing to the deleted ones. The database paths can be overridden

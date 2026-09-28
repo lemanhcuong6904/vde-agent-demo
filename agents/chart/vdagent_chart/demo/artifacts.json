@@ -1,4 +1,12 @@
 {
+  "fixture_source": {
+    "snapshot_id": "SNAP-20260630-01",
+    "exports": [
+      "fact_unit_inventory_snapshot.csv",
+      "fact_unit_price_history.csv",
+      "fact_sales_funnel_daily.csv"
+    ]
+  },
   "artifacts": [
     {"artifact_id":"metric_dom_target","version":1,"artifact_type":"metric","run_id":"run_vhop_demo_001","status":"validated","content_hash":"sha256:metric-dom-target-v1","scope":{"project_ids":["VHOP"],"snapshot_id":"2026-06-30","data_grain":"unit"},"payload":{"unit":"day","grain":"unit","records":[{"label":"A12-08","dom":126.0}],"calculation_refs":["calc_dom/v1"],"source_refs":["fact_unit_inventory_snapshot"]}},
     {"artifact_id":"metric_dom_peer","version":1,"artifact_type":"metric","run_id":"run_vhop_demo_001","status":"validated","content_hash":"sha256:metric-dom-peer-v1","scope":{"project_ids":["VHOP"],"snapshot_id":"2026-06-30","data_grain":"group"},"payload":{"unit":"day","grain":"group","records":[{"label":"Peer group","dom":91.0}],"calculation_refs":["calc_dom/v1"],"source_refs":["fact_unit_inventory_snapshot"]}},
