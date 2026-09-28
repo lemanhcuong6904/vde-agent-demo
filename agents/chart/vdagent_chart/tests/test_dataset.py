@@ -5,9 +5,36 @@ import unittest
 from vdagent_chart.dataset import assemble_dataset
 from vdagent_chart.fixture_store import FixtureArtifactStore
 from vdagent_chart.fixtures import load_demo_task
+from vdagent_chart.evidence import build_evidence_map
+from vdagent_chart.policy import load_policy
+from vdagent_chart.resolution import resolve_context
 
 
 class DatasetTests(unittest.TestCase):
+    def test_typed_assembly_declares_null_handling_and_transform_log(self) -> None:
+        task = load_demo_task("price_trend")
+        context = resolve_context(task, FixtureArtifactStore.demo(), load_policy(task.policy_ref))
+        binding = build_evidence_map(context)["vt_price_trend"]
+
+        data = assemble_dataset(context, binding, {"chart_type": "line"})
+
+        self.assertEqual(data["null_handling"], "preserve")
+        self.assertEqual(data["presentation_transforms"], [])
+        self.assertEqual(data["mode"], "inline")
+
+    def test_target_vs_peer_uses_the_validated_comparison_values(self) -> None:
+        task = load_demo_task("dom_peer")
+        store = FixtureArtifactStore.demo()
+        artifacts = [store.get_exact(ref) for ref in task.artifact_refs]
+
+        data = assemble_dataset(task.visual_targets[0], artifacts, {"chart_type": "bar"})
+
+        self.assertEqual(
+            data["records"],
+            [{"label": "A12-08", "dom": 126.0}, {"label": "Peer group", "dom": 91.0}],
+        )
+        self.assertEqual(data["unit"], "day")
+
     def test_assembly_preserves_values_nulls_and_a_stable_hash(self) -> None:
         task = load_demo_task("price_trend")
         store = FixtureArtifactStore.demo()

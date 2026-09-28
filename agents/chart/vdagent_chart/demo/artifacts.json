@@ -8,15 +8,258 @@
     ]
   },
   "artifacts": [
-    {"artifact_id":"metric_dom_target","version":1,"artifact_type":"metric","run_id":"run_vhop_demo_001","status":"validated","content_hash":"sha256:metric-dom-target-v1","scope":{"project_ids":["VHOP"],"snapshot_id":"2026-06-30","data_grain":"unit"},"payload":{"unit":"day","grain":"unit","records":[{"label":"A12-08","dom":126.0}],"calculation_refs":["calc_dom/v1"],"source_refs":["fact_unit_inventory_snapshot"]}},
-    {"artifact_id":"metric_dom_peer","version":1,"artifact_type":"metric","run_id":"run_vhop_demo_001","status":"validated","content_hash":"sha256:metric-dom-peer-v1","scope":{"project_ids":["VHOP"],"snapshot_id":"2026-06-30","data_grain":"group"},"payload":{"unit":"day","grain":"group","records":[{"label":"Peer group","dom":91.0}],"calculation_refs":["calc_dom/v1"],"source_refs":["fact_unit_inventory_snapshot"]}},
-    {"artifact_id":"evidence_dom_peer","version":1,"artifact_type":"evidence","run_id":"run_vhop_demo_001","status":"validated","content_hash":"sha256:evidence-dom-peer-v1","scope":{"project_ids":["VHOP"],"snapshot_id":"2026-06-30","data_grain":"group"},"payload":{"metric_ids":["metric_dom_target","metric_dom_peer"],"limitations":[]}},
-    {"artifact_id":"comparison_dom_peer","version":1,"artifact_type":"comparison","run_id":"run_vhop_demo_001","status":"validated","content_hash":"sha256:comparison-dom-peer-v1","scope":{"project_ids":["VHOP"],"snapshot_id":"2026-06-30","data_grain":"group"},"payload":{"metric_ids":["metric_dom_target","metric_dom_peer"],"evidence_ids":["evidence_dom_peer"],"benchmark":91.0,"gap":35.0}},
-    {"artifact_id":"metric_price_trend","version":1,"artifact_type":"metric","run_id":"run_vhop_demo_001","status":"validated","content_hash":"sha256:metric-price-trend-v1","scope":{"project_ids":["VHOP"],"snapshot_id":"2026-06-30","data_grain":"month"},"payload":{"unit":"VND/m2","grain":"month","records":[{"month":"2026-01","price_m2":68.0},{"month":"2026-02","price_m2":69.2},{"month":"2026-03","price_m2":70.1}],"calculation_refs":["calc_price_m2/v1"],"source_refs":["fact_unit_price_history"]}},
-    {"artifact_id":"metric_inventory_composition","version":1,"artifact_type":"metric","run_id":"run_vhop_demo_001","status":"validated","content_hash":"sha256:metric-inventory-composition-v1","scope":{"project_ids":["VHOP"],"snapshot_id":"2026-06-30","data_grain":"status"},"payload":{"unit":"unit","grain":"status","records":[{"status":"Available","count":120},{"status":"Booked","count":38},{"status":"Sold","count":142}],"calculation_refs":["calc_inventory/v1"],"source_refs":["fact_unit_inventory_snapshot"]}},
-    {"artifact_id":"metric_dom_distribution","version":1,"artifact_type":"metric","run_id":"run_vhop_demo_001","status":"validated","content_hash":"sha256:metric-dom-distribution-v1","scope":{"project_ids":["VHOP"],"snapshot_id":"2026-06-30","data_grain":"unit"},"payload":{"unit":"day","grain":"unit","records":[{"bin_start":0,"bin_end":30,"count":12},{"bin_start":30,"bin_end":60,"count":25},{"bin_start":60,"bin_end":90,"count":18},{"bin_start":90,"bin_end":120,"count":8}],"calculation_refs":["calc_dom/v1"],"source_refs":["fact_unit_inventory_snapshot"]}},
-    {"artifact_id":"metric_price_dom_scatter","version":1,"artifact_type":"metric","run_id":"run_vhop_demo_001","status":"validated","content_hash":"sha256:metric-price-dom-scatter-v1","scope":{"project_ids":["VHOP"],"snapshot_id":"2026-06-30","data_grain":"unit"},"payload":{"unit":"mixed","grain":"unit","records":[{"unit_id":"U01","price_m2":72.0,"dom":32},{"unit_id":"U02","price_m2":69.0,"dom":55},{"unit_id":"U03","price_m2":75.0,"dom":88},{"unit_id":"U04","price_m2":67.0,"dom":110},{"unit_id":"U05","price_m2":71.0,"dom":70},{"unit_id":"U06","price_m2":73.0,"dom":43},{"unit_id":"U07","price_m2":66.0,"dom":126},{"unit_id":"U08","price_m2":74.0,"dom":65}],"calculation_refs":["calc_price_m2/v1","calc_dom/v1"],"source_refs":["fact_unit_price_history"]}},
-    {"artifact_id":"metric_sales_funnel","version":1,"artifact_type":"metric","run_id":"run_vhop_demo_001","status":"validated","content_hash":"sha256:metric-sales-funnel-v1","scope":{"project_ids":["VHOP"],"snapshot_id":"2026-06-30","data_grain":"stage"},"payload":{"unit":"lead","grain":"stage","records":[{"stage":"Visit","order":1,"count":520},{"stage":"Booking","order":2,"count":180},{"stage":"Deposit","order":3,"count":104},{"stage":"Contract","order":4,"count":82}],"calculation_refs":["calc_funnel/v1"],"source_refs":["fact_sales_funnel_daily"]}},
-    {"artifact_id":"metric_area_month_heatmap","version":1,"artifact_type":"metric","run_id":"run_vhop_demo_001","status":"validated","content_hash":"sha256:metric-area-month-heatmap-v1","scope":{"project_ids":["VHOP"],"snapshot_id":"2026-06-30","data_grain":"area_month"},"payload":{"unit":"unit","grain":"area_month","records":[{"area":"A01","month":"2026-04","available":34},{"area":"A01","month":"2026-05","available":30},{"area":"A02","month":"2026-04","available":27},{"area":"A02","month":"2026-05","available":35}],"calculation_refs":["calc_inventory/v1"],"source_refs":["fact_unit_inventory_snapshot"]}}
+    {
+      "artifact_id": "metric_dom_target",
+      "version": 1,
+      "artifact_type": "metric",
+      "run_id": "run_vhop_demo_001",
+      "status": "validated",
+      "content_hash": "sha256:metric-dom-target-v1",
+      "scope": {
+        "project_ids": ["VHOP"],
+        "snapshot_id": "2026-06-30",
+        "data_grain": "unit"
+      },
+      "payload": {
+        "unit": "day",
+        "grain": "unit",
+        "records": [{ "label": "A12-08", "dom": 126.0 }],
+        "calculation_refs": ["calc_dom/v1"],
+        "source_refs": ["fact_unit_inventory_snapshot"]
+      }
+    },
+    {
+      "artifact_id": "metric_dom_peer",
+      "version": 1,
+      "artifact_type": "metric",
+      "run_id": "run_vhop_demo_001",
+      "status": "validated",
+      "content_hash": "sha256:metric-dom-peer-v1",
+      "scope": {
+        "project_ids": ["VHOP"],
+        "snapshot_id": "2026-06-30",
+        "data_grain": "group"
+      },
+      "payload": {
+        "unit": "day",
+        "grain": "group",
+        "records": [{ "label": "Peer group", "dom": 91.0 }],
+        "calculation_refs": ["calc_dom/v1"],
+        "source_refs": ["fact_unit_inventory_snapshot"]
+      }
+    },
+    {
+      "artifact_id": "evidence_dom_peer",
+      "version": 1,
+      "artifact_type": "evidence",
+      "run_id": "run_vhop_demo_001",
+      "status": "validated",
+      "content_hash": "sha256:evidence-dom-peer-v1",
+      "scope": {
+        "project_ids": ["VHOP"],
+        "snapshot_id": "2026-06-30",
+        "data_grain": "group"
+      },
+      "payload": {
+        "metric_ids": ["metric_dom_target", "metric_dom_peer"],
+        "limitations": []
+      }
+    },
+    {
+      "artifact_id": "comparison_dom_peer",
+      "version": 1,
+      "artifact_type": "comparison",
+      "run_id": "run_vhop_demo_001",
+      "status": "validated",
+      "content_hash": "sha256:comparison-dom-peer-v1",
+      "scope": {
+        "project_ids": ["VHOP"],
+        "snapshot_id": "2026-06-30",
+        "data_grain": "group"
+      },
+      "payload": {
+        "metric_ids": ["metric_dom_target", "metric_dom_peer"],
+        "evidence_ids": ["evidence_dom_peer"],
+        "benchmark": 91.0,
+        "gap": 35.0
+      }
+    },
+    {
+      "artifact_id": "comparison_dom_peer",
+      "version": 2,
+      "artifact_type": "comparison",
+      "run_id": "run_vhop_demo_001",
+      "status": "validated",
+      "content_hash": "sha256:comparison-dom-peer-v2",
+      "scope": {
+        "project_ids": ["VHOP"],
+        "snapshot_id": "2026-06-30",
+        "data_grain": "group"
+      },
+      "payload": {
+        "metric_ids": ["metric_dom_target", "metric_dom_peer"],
+        "evidence_ids": ["evidence_dom_peer"],
+        "benchmark": 91.0,
+        "gap": 35.0,
+        "display_records": [
+          {"label": "A12-08", "dom": 126.0},
+          {"label": "Peer group", "dom": 91.0}
+        ],
+        "unit": "day",
+        "grain": "group"
+      }
+    },
+    {
+      "artifact_id": "metric_price_trend",
+      "version": 1,
+      "artifact_type": "metric",
+      "run_id": "run_vhop_demo_001",
+      "status": "validated",
+      "content_hash": "sha256:metric-price-trend-v1",
+      "scope": {
+        "project_ids": ["VHOP"],
+        "snapshot_id": "2026-06-30",
+        "data_grain": "month"
+      },
+      "payload": {
+        "unit": "VND/m2",
+        "grain": "month",
+        "records": [
+          { "month": "2026-01", "price_m2": 68.0 },
+          { "month": "2026-02", "price_m2": 69.2 },
+          { "month": "2026-03", "price_m2": 70.1 }
+        ],
+        "calculation_refs": ["calc_price_m2/v1"],
+        "source_refs": ["fact_unit_price_history"]
+      }
+    },
+    {
+      "artifact_id": "metric_inventory_composition",
+      "version": 1,
+      "artifact_type": "metric",
+      "run_id": "run_vhop_demo_001",
+      "status": "validated",
+      "content_hash": "sha256:metric-inventory-composition-v1",
+      "scope": {
+        "project_ids": ["VHOP"],
+        "snapshot_id": "2026-06-30",
+        "data_grain": "status"
+      },
+      "payload": {
+        "unit": "unit",
+        "grain": "status",
+        "records": [
+          { "status": "Available", "count": 120 },
+          { "status": "Booked", "count": 38 },
+          { "status": "Sold", "count": 142 }
+        ],
+        "calculation_refs": ["calc_inventory/v1"],
+        "source_refs": ["fact_unit_inventory_snapshot"]
+      }
+    },
+    {
+      "artifact_id": "metric_dom_distribution",
+      "version": 1,
+      "artifact_type": "metric",
+      "run_id": "run_vhop_demo_001",
+      "status": "validated",
+      "content_hash": "sha256:metric-dom-distribution-v1",
+      "scope": {
+        "project_ids": ["VHOP"],
+        "snapshot_id": "2026-06-30",
+        "data_grain": "unit"
+      },
+      "payload": {
+        "unit": "day",
+        "grain": "unit",
+        "records": [
+          { "bin_start": 0, "bin_end": 30, "count": 12 },
+          { "bin_start": 30, "bin_end": 60, "count": 25 },
+          { "bin_start": 60, "bin_end": 90, "count": 18 },
+          { "bin_start": 90, "bin_end": 120, "count": 8 }
+        ],
+        "calculation_refs": ["calc_dom/v1"],
+        "source_refs": ["fact_unit_inventory_snapshot"]
+      }
+    },
+    {
+      "artifact_id": "metric_price_dom_scatter",
+      "version": 1,
+      "artifact_type": "metric",
+      "run_id": "run_vhop_demo_001",
+      "status": "validated",
+      "content_hash": "sha256:metric-price-dom-scatter-v1",
+      "scope": {
+        "project_ids": ["VHOP"],
+        "snapshot_id": "2026-06-30",
+        "data_grain": "unit"
+      },
+      "payload": {
+        "unit": "mixed",
+        "grain": "unit",
+        "records": [
+          { "unit_id": "U01", "price_m2": 72.0, "dom": 32 },
+          { "unit_id": "U02", "price_m2": 69.0, "dom": 55 },
+          { "unit_id": "U03", "price_m2": 75.0, "dom": 88 },
+          { "unit_id": "U04", "price_m2": 67.0, "dom": 110 },
+          { "unit_id": "U05", "price_m2": 71.0, "dom": 70 },
+          { "unit_id": "U06", "price_m2": 73.0, "dom": 43 },
+          { "unit_id": "U07", "price_m2": 66.0, "dom": 126 },
+          { "unit_id": "U08", "price_m2": 74.0, "dom": 65 }
+        ],
+        "calculation_refs": ["calc_price_m2/v1", "calc_dom/v1"],
+        "source_refs": ["fact_unit_price_history"]
+      }
+    },
+    {
+      "artifact_id": "metric_sales_funnel",
+      "version": 1,
+      "artifact_type": "metric",
+      "run_id": "run_vhop_demo_001",
+      "status": "validated",
+      "content_hash": "sha256:metric-sales-funnel-v1",
+      "scope": {
+        "project_ids": ["VHOP"],
+        "snapshot_id": "2026-06-30",
+        "data_grain": "stage"
+      },
+      "payload": {
+        "unit": "lead",
+        "grain": "stage",
+        "records": [
+          { "stage": "Visit", "order": 1, "count": 520 },
+          { "stage": "Booking", "order": 2, "count": 180 },
+          { "stage": "Deposit", "order": 3, "count": 104 },
+          { "stage": "Contract", "order": 4, "count": 82 }
+        ],
+        "calculation_refs": ["calc_funnel/v1"],
+        "source_refs": ["fact_sales_funnel_daily"]
+      }
+    },
+    {
+      "artifact_id": "metric_area_month_heatmap",
+      "version": 1,
+      "artifact_type": "metric",
+      "run_id": "run_vhop_demo_001",
+      "status": "validated",
+      "content_hash": "sha256:metric-area-month-heatmap-v1",
+      "scope": {
+        "project_ids": ["VHOP"],
+        "snapshot_id": "2026-06-30",
+        "data_grain": "area_month"
+      },
+      "payload": {
+        "unit": "unit",
+        "grain": "area_month",
+        "records": [
+          { "area": "A01", "month": "2026-04", "available": 34 },
+          { "area": "A01", "month": "2026-05", "available": 30 },
+          { "area": "A02", "month": "2026-04", "available": 27 },
+          { "area": "A02", "month": "2026-05", "available": 35 }
+        ],
+        "calculation_refs": ["calc_inventory/v1"],
+        "source_refs": ["fact_unit_inventory_snapshot"]
+      }
+    }
   ]
 }
