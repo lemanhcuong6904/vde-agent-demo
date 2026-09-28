@@ -16,13 +16,13 @@ build structurally different programs. Behaviour the Backend can neither see nor
 |---|---|---|---|
 | orchestrator, data, compare | LiteLLM (unchanged) | nothing: the control group | assistant steps, tool results |
 | insight | LangChain 1.x `create_agent` + middleware | recalls earlier findings (vector search), extracts and saves new ones, dedups | the same, plus `ctx.memory` rows |
-| report | LangGraph hand-built `StateGraph` | drafts are judged by a second model (Jev Router); one revision edge; only the approved answer is emitted | only the final, assessed answer |
+| report | LangGraph hand-built `StateGraph` | drafts are gated by Jev (`typesafe/jev-1.13`), a decisions model that is not a chat model; one revision edge driven by its typed verdict; only the approved answer is emitted | only the final, assessed answer |
 
 **Unchanged:** the engine flow, REST/SSE, UI, MCP server, `config.yaml` plugin entries, agent
 names, the demo query, `_template`, and the orchestrator/data/compare agents.
 
-**Out of scope:** REST or UI for memories, memory expiry, hybrid (rank-fusion) search, the raw
-TypeSafe Jev API, and changes to the unchanged agents.
+**Out of scope:** REST or UI for memories, memory expiry, hybrid (rank-fusion) search, Jev Router,
+and changes to the unchanged agents.
 
 ### 1.1 Decisions log
 
@@ -35,7 +35,7 @@ TypeSafe Jev API, and changes to the unchanged agents.
 | D5 | The agent computes embeddings; the Backend never calls an embedding model | Model choice stays with the agent team, which is the point being proven |
 | D6 | Vectors are a nullable BLOB compared with `vec_distance_cosine`, not a `vec0` table | `vec0` fixes one dimension for all agents; brute force within one scope is fine at PoC scale |
 | D7 | Approach A: two showcase agents on two frameworks, three agents left as control | Three designs behind one interface; YAGNI over five frameworks |
-| D8 | Jev is used through OpenRouter `typesafe/jev-router` as a quality judge | User choice; OpenRouter has only Jev Router (`typesafe/jev-latest` → 400, checked), which picks a model and returns text, not a calibrated score |
+| D8 | Jev (`typesafe/jev-1.13`) is called through OpenRouter's decisions endpoint as the report quality gate | User choice. It returns typed, calibrated answers (`noul` probability, `choice` with probabilities; checked live: 0.59 s, $0.00002). It cannot be used with `chat/completions` (400, checked), so no ReAct loop has a slot for it. `typesafe/jev-router` is rejected: it only picks a chat model and returns text |
 | D9 | insight wraps its own `mcp_client.py` tools, not `langchain-mcp-adapters` | Adapters require `mcp<2`; the workspace is locked to `mcp 2.2.0` and in-process plugins share one environment |
 | D10 | R7 budgets emitted assistant steps only | Internal calls (embeddings, extraction, judge) are invisible to the Backend and belong to the plugin |
 
@@ -179,13 +179,14 @@ A hand-built `StateGraph` (not `create_agent`), to contrast with insight.
 flowchart LR
   S((start)) --> A[agent: model call]
   A -- tool calls --> T[tools: MCP / send_to_agent] --> A
-  A -- text draft --> J[assess: Jev Router]
-  J -- PASS --> F[finalize: emit answer] --> E((end))
-  J -- "REVISE, revisions < 1, steps left" --> A
-  J -- "REVISE, no budget" --> F
+  A -- text draft --> J[assess: Jev decision]
+  J -- "acceptable ≥ 0.5" --> F[finalize: emit answer] --> E((end))
+  J -- "< 0.5, revisions < 1, steps left" --> A
+  J -- "< 0.5, no budget" --> F
 ```
 
-**State** (per turn): `messages` (internal transcript), `steps`, `revisions`, `draft`, `critique`.
+**State** (per turn): `messages` (internal transcript), `steps`, `revisions`, `draft`, `artifacts`
+(ids matching `\b(ds|ch|rp)_\w+` seen in this turn's tool results), `critique`.
 
 **Nodes** (`graph.py`):
 
@@ -194,25 +195,40 @@ flowchart LR
   (R2). A text reply is stored as `draft` and **not emitted**. On step `ctx.max_steps` tools are
   unbound; tool calls on that step become `STEP_LIMIT_TEXT`.
 - `tools`: as today: `send_to_agent` → `ctx.call_agent`, MCP tools through `run_mcp_tool`,
-  `error: …` on failure, `emit_tool_result` per call, results appended to `messages`.
-- `assess` (`judge.py`): one call to `JUDGE_MODEL` (default `typesafe/jev-router`, same OpenRouter
-  key) with `prompts/assess.md`. The rubric: answers the request, cites the `ch_…`/`rp_…` ids it
-  created, quotes key numbers, invents nothing. The expected reply is `PASS` or `REVISE: <reason>`.
-  An unparseable reply or an error counts as PASS and is logged.
-- Edges after `assess`: PASS → `finalize`. REVISE with `revisions == 0` and `steps < max_steps` →
-  append the draft and a reviewer message with the critique to `messages`, `revisions += 1`, → `agent`.
-  Otherwise → `finalize`.
+  `error: …` on failure, `emit_tool_result` per call, results appended to `messages`, ids added to
+  `artifacts`.
+- `assess` (`judge.py`): one `POST` to `JEV_DECISIONS_URL` (default
+  `https://openrouter.ai/api/alpha/decisions`) with `httpx` and the existing `OPENAI_API_KEY`. The
+  endpoint is not OpenAI-compatible, so no chat client is involved. Body:
+
+  ```json
+  {"model": "<JUDGE_MODEL, default typesafe/jev-1.13>",
+   "state": {"request": "<inbound message>", "answer": "<draft>", "artifacts": ["ds_…", "ch_…", "rp_…"]},
+   "questions": {
+     "acceptable": {"type": "noul", "instructions": "Is this answer acceptable to send to the requester?",
+                    "criteria": {"true": "…answers every part, cites ids from artifacts, quotes key numbers",
+                                 "false": "…misses a part, cites no or unknown ids, vague numbers"}},
+     "problem": {"type": "choice", "instructions": "Main weakness of the answer",
+                 "criteria": {"none": "…", "missing_part": "…", "unsupported_claim": "…",
+                              "no_numbers": "…", "unclear": "…"}}}}
+  ```
+
+  The questions live as data in `judge.py`. The response's `answers.acceptable.noul` and
+  `answers.problem.choice` (with probabilities) are logged at INFO. An HTTP error, timeout (10 s)
+  or a missing/malformed answer counts as a pass and is logged as a warning.
+- Edges after `assess`: `noul ≥ PASS_THRESHOLD` (0.5) → `finalize`. Below it, with
+  `revisions == 0` and `steps < max_steps` → append the draft and a reviewer message to `messages`,
+  `revisions += 1`, → `agent`. The reviewer message is a fixed instruction per `problem` choice
+  (e.g. `missing_part` → "Your answer misses part of the request; cover every part of it."), with a
+  generic one for `none`. Otherwise → `finalize`.
 - `finalize`: `ctx.emit_assistant(draft)`.
 
-The Backend therefore sees only the assessed answer. At most two judge calls per turn (plugin
+The Backend therefore sees only the assessed answer. At most two Jev calls per turn (plugin
 budget, R7).
 
-**Honest framing** (module docstring and README): Jev Router picks the judging model; the verdict
-is text, not a calibrated probability.
-
-**Other changes:** `compact()` uses `ChatOpenAI`. `settings.py`: optional `JUDGE_MODEL`. The README
-includes the graph from `graph.get_graph().draw_mermaid()`. Deleted: `llm.py`. `pyproject.toml`:
-drop `litellm`; add `langgraph`, `langchain-openai`.
+**Other changes:** `compact()` uses `ChatOpenAI`. `settings.py`: optional `JUDGE_MODEL` and
+`JEV_DECISIONS_URL`. The README includes the graph from `graph.get_graph().draw_mermaid()`.
+Deleted: `llm.py`. `pyproject.toml`: drop `litellm`; add `langgraph`, `langchain-openai`, `httpx`.
 
 ## 5. Shared pieces
 
@@ -220,8 +236,8 @@ drop `litellm`; add `langgraph`, `langchain-openai`.
   `sqlite-vec` (backend), `langchain` + `langchain-openai` (insight), `langgraph` +
   `langchain-openai` (report). The first implementation step runs `uv lock` to prove they resolve
   with `litellm` and `mcp 2.2.0`.
-- **Config:** `EMBED_MODEL` in `agents/insight/.env.example`, `JUDGE_MODEL` in
-  `agents/report/.env.example`, both optional; README environment table updated.
+- **Config:** `EMBED_MODEL` in `agents/insight/.env.example`; `JUDGE_MODEL` and
+  `JEV_DECISIONS_URL` in `agents/report/.env.example`; all optional; README environment table updated.
 - **Docs:** README section "Agents are different programs" with the table from §1 and the report
   graph; SDK docstring (R1, R7, `ctx.memory`); `_template` README mentions `ctx.memory`; the
   2026-09-26 plugins spec gets a one-line amendment pointer to this spec.
@@ -233,7 +249,9 @@ drop `litellm`; add `langgraph`, `langchain-openai`.
 - Vector search is a brute-force scan per scope; fine for PoC volumes only.
 - Embeddings from different models with equal dimension are indistinguishable to the Backend; an
   agent that changes `EMBED_MODEL` must accept mixed-quality recall or delete old notes.
-- Jev Router's verdict is a generative model's text; a lenient judge makes the gate a no-op.
+- The decisions endpoint is `alpha`; its request or response shape may change.
+- `PASS_THRESHOLD` is untuned. The live probe gave a decent answer `noul` 0.42, so revisions may
+  be common; the one-revision cap bounds the cost.
 
 ## 7. Testing (TDD)
 
@@ -256,13 +274,15 @@ Each item starts as a failing test.
 - findings saved with embeddings after the answer; near-duplicates skipped;
 - memory failures (embedding error, bad extraction JSON) still end the turn normally.
 
-**report** (fake chat model, fake judge):
-- PASS emits exactly one final answer, equal to the draft;
-- REVISE feeds the critique back and emits only the revised draft;
+**report** (fake chat model; the Jev call faked at the HTTP layer with `httpx.MockTransport`):
+- `noul` at the threshold (0.5) finalizes; the draft is emitted exactly once as the final answer;
+- below the threshold, the reviewer message for the returned `problem` choice reaches the next
+  model request, and only the revised draft is emitted;
 - at most one revision; no revision when the step budget is spent;
-- judge garbage or error → PASS;
+- HTTP error, timeout, or a response missing `acceptable.noul` → pass;
+- `state.artifacts` holds the ids from this turn's tool results;
 - tool-call steps keep contract order.
 
-**Smoke** (throwaway DB, real OpenRouter): run the demo query; logs show the `assess` verdict and
+**Smoke** (throwaway DB, real OpenRouter): run the demo query; logs show the Jev decision and
 `memories` holds insight findings with embeddings; a related second query logs the recalled notes.
 The full Python suite and Vitest stay green.
