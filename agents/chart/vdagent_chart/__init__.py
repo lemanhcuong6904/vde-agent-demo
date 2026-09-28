@@ -7,8 +7,20 @@ from vdagent_sdk import PluginAPI
 
 from .agent import ChartPluginAgent, DESCRIPTION, NAME
 from .fixture_store import FixtureArtifactStore
+from .llm import OpenAIVisualReasoner, VisualReasoner
 from .service import ChartAgentService
+from .settings import load_settings, read_env
+from .errors import ChartError
+
+
+def make_reasoner(env: Mapping[str, str]) -> VisualReasoner | None:
+    """Enable the optional GPT advisor only with a complete local config."""
+    try:
+        return OpenAIVisualReasoner(load_settings(env))
+    except ChartError:
+        return None
 
 
 def setup(api: PluginAPI, opts: Mapping[str, Any]) -> None:
-    api.register_agent(name=NAME, description=DESCRIPTION, agent=ChartPluginAgent(ChartAgentService(FixtureArtifactStore.demo())))
+    service = ChartAgentService(FixtureArtifactStore.demo(), reasoner=make_reasoner(read_env()))
+    api.register_agent(name=NAME, description=DESCRIPTION, agent=ChartPluginAgent(service))

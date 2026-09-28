@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 
 from .contracts import ChartTaskInput, ChartTaskResult, TargetResult
 from .dataset import assemble_dataset
 from .errors import ChartError
 from .fixture_store import FixtureArtifactStore
+from .llm import VisualReasoner
 from .policy import load_policy
 from .presentation import build_presentation
 from .selection import select_chart
+from .telemetry import TelemetryPort
 from .validation import validate_input
 from .vega import build_vega_spec
 
@@ -17,11 +20,21 @@ from .vega import build_vega_spec
 class ChartAgentService:
     """Deterministic execution entry point for fixture-backed Chart Agent demos."""
 
-    def __init__(self, store: FixtureArtifactStore) -> None:
+    def __init__(
+        self,
+        store: FixtureArtifactStore,
+        *,
+        reasoner: VisualReasoner | None = None,
+        telemetry: TelemetryPort | None = None,
+    ) -> None:
         self._store = store
+        self._reasoner = reasoner
+        self._telemetry = telemetry
         self.artifacts: dict[str, dict] = {}
 
-    def execute(self, task: ChartTaskInput) -> ChartTaskResult:
+    def execute(
+        self, task: ChartTaskInput, llm_suggestions: Mapping[str, str | None] | None = None
+    ) -> ChartTaskResult:
         try:
             resolved = [self._store.get_exact(ref) for ref in task.artifact_refs]
         except ChartError as exc:
@@ -34,7 +47,7 @@ class ChartAgentService:
         errors: list[dict[str, str]] = []
         for target in task.visual_targets:
             try:
-                decision = select_chart(target, policy)
+                decision = select_chart(target, policy, (llm_suggestions or {}).get(target.target_id))
                 dataset = assemble_dataset(target, resolved, decision)
             except ChartError as exc:
                 targets.append(TargetResult(target.target_id, "failed", reason_code=exc.code))
@@ -59,3 +72,28 @@ class ChartAgentService:
             tuple(targets),
             errors=tuple(errors),
         )
+
+    async def execute_async(self, task: ChartTaskInput) -> ChartTaskResult:
+        """Run optional bounded LLM advice, then the deterministic workflow."""
+        self._record("chart.started", {"target_count": len(task.visual_targets)})
+        suggestions: dict[str, str | None] = {}
+        if self._reasoner is not None:
+            policy = load_policy(task.policy_ref)
+            for target in task.visual_targets:
+                try:
+                    suggestions[target.target_id] = await self._reasoner.suggest(
+                        target.visual_question, policy.allowed_chart_types
+                    )
+                except Exception:
+                    suggestions[target.target_id] = None
+                    self._record("chart.llm.unavailable", {"target_count": 1})
+        result = self.execute(task, suggestions)
+        self._record(
+            "chart.completed",
+            {"status": result.status, "artifact_count": len(result.chart_artifacts)},
+        )
+        return result
+
+    def _record(self, name: str, attributes: Mapping[str, str | int | bool]) -> None:
+        if self._telemetry is not None:
+            self._telemetry.record(name, attributes)

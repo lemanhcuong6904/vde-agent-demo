@@ -20,7 +20,7 @@ class ChartPluginAgent:
             return
         scenario = text.removeprefix("chart demo ").strip()
         try:
-            result = self._service.execute(load_demo_task(scenario))
+            result = await self._service.execute_async(load_demo_task(scenario))
         except KeyError:
             await ctx.emit_assistant(f"Unknown chart demo scenario: {scenario}")
             return
