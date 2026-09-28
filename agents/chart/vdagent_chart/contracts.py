@@ -22,6 +22,15 @@ class Scope:
     snapshot_id: str | None = None
     time_range: tuple[str, str] | None = None
     data_grain: str | None = None
+    filters: tuple[tuple[str, str, str], ...] = ()
+    population_ref: str | None = None
+
+
+@dataclass(frozen=True)
+class Intent:
+    purpose: str = "direct_visualization"
+    business_question: str | None = None
+    presentation_context: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -44,6 +53,23 @@ class ChartTaskInput:
     artifact_refs: tuple[ArtifactRef, ...]
     policy_ref: str
     idempotency_key: str
+    intent: Intent = field(default_factory=Intent)
+    requested_by: str | None = None
+    auth_context: dict[str, Any] = field(default_factory=dict)
+    trace_context: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class NormalizedArtifact:
+    artifact_id: str
+    version: int
+    artifact_type: ArtifactType
+    run_id: str
+    status: str
+    content_hash: str
+    scope: Scope
+    payload: dict[str, Any]
+    limitations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
