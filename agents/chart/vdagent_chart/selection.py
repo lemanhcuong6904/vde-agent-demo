@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from .contracts import ChartPolicy, VisualTarget
+from .compatibility import compatibility_errors
+from .profile import DataProfile
 
 QUESTION_DEFAULTS = {
     "current_value": "kpi_card", "trend": "line", "comparison": "bar", "target_vs_peer": "bar",
@@ -14,10 +16,20 @@ QUESTION_COMPATIBLE_TYPES = {
 }
 
 
-def select_chart(target: VisualTarget, policy: ChartPolicy, llm_suggestion: str | None = None) -> dict[str, str]:
+def select_chart(
+    target: VisualTarget,
+    policy: ChartPolicy,
+    llm_suggestion: str | None = None,
+    profile: DataProfile | None = None,
+) -> dict[str, str | None]:
     preferred = target.preferred_chart_type or llm_suggestion
     expected = QUESTION_DEFAULTS.get(target.visual_question, policy.fallback_chart_type)
     compatible = QUESTION_COMPATIBLE_TYPES.get(target.visual_question, (expected,))
     if preferred in compatible and preferred in policy.allowed_chart_types:
-        return {"chart_type": preferred, "reason_code": "SEL_PREFERENCE_ACCEPTED"}
-    return {"chart_type": expected if expected in policy.allowed_chart_types else policy.fallback_chart_type, "reason_code": "SEL_POLICY_VISUAL_QUESTION"}
+        selected, reason = preferred, "SEL_PREFERENCE_ACCEPTED"
+    else:
+        selected, reason = expected if expected in policy.allowed_chart_types else policy.fallback_chart_type, "SEL_POLICY_VISUAL_QUESTION"
+    errors = compatibility_errors(selected, profile) if profile is not None else ()
+    if errors:
+        return {"chart_type": policy.fallback_chart_type, "reason_code": "SEL_FALLBACK_INCOMPATIBLE", "fallback_reason": errors[0].code}
+    return {"chart_type": selected, "reason_code": reason, "fallback_reason": None}

@@ -3,13 +3,17 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 
-from .contracts import ChartTaskInput, ChartTaskResult, TargetResult
+from .contracts import ChartTaskInput, ChartTaskResult, ResolvedChartContext, TargetResult
+from .evidence import build_evidence_map
 from .dataset import assemble_dataset
 from .errors import ChartError
 from .fixture_store import FixtureArtifactStore
 from .llm import VisualReasoner
 from .policy import load_policy
+from .profile import profile_target
+from .schema import normalize_artifact
 from .presentation import build_presentation
 from .selection import select_chart
 from .telemetry import TelemetryPort
@@ -42,12 +46,23 @@ class ChartAgentService:
             return ChartTaskResult("chart-result/2.0", task.run_id, task.task_id, "failed", dependency_requests=({"artifact_id": missing.artifact_id, "version": missing.version, "code": exc.code},))
         policy = load_policy(task.policy_ref)
         validate_input(task, resolved, policy)
+        context = ResolvedChartContext(
+            task, policy, tuple(normalize_artifact(artifact) for artifact in resolved),
+            {"overall_result": "pass"},
+        )
         refs: list[str] = []
         targets: list[TargetResult] = []
         errors: list[dict[str, str]] = []
         for target in task.visual_targets:
             try:
-                decision = select_chart(target, policy, (llm_suggestions or {}).get(target.target_id))
+                target_context = replace(context, task=replace(task, visual_targets=(target,)))
+                binding = build_evidence_map(target_context)[target.target_id]
+                decision = select_chart(
+                    target,
+                    policy,
+                    (llm_suggestions or {}).get(target.target_id),
+                    profile_target(target_context, binding),
+                )
                 dataset = assemble_dataset(target, resolved, decision)
             except ChartError as exc:
                 targets.append(TargetResult(target.target_id, "failed", reason_code=exc.code))

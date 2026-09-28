@@ -5,9 +5,18 @@ import unittest
 from vdagent_chart.contracts import VisualTarget
 from vdagent_chart.policy import load_policy
 from vdagent_chart.selection import select_chart
+from vdagent_chart.profile import DataProfile
 
 
 class SelectionTests(unittest.TestCase):
+    def test_incompatible_preference_falls_back_to_a_table(self) -> None:
+        profile = DataProfile(1, ("price_m2",), ("label",), False, "month", "VND/m2")
+        policy = load_policy("chart-policy/demo-1.0")
+        decision = select_chart(VisualTarget("target", "trend", preferred_chart_type="line"), policy, profile=profile)
+
+        self.assertEqual(decision["chart_type"], "table")
+        self.assertEqual(decision["fallback_reason"], "DAT-002")
+
     def test_maps_visual_questions_to_policy_compatible_chart_types(self) -> None:
         policy = load_policy("chart-policy/demo-1.0")
         self.assertEqual(select_chart(VisualTarget("a", "trend"), policy)["chart_type"], "line")
