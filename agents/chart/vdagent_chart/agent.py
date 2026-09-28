@@ -34,9 +34,10 @@ class ChartPluginAgent:
                 refs = []
                 for local_ref in result.chart_artifacts:
                     local = self._service.artifacts[local_ref.removesuffix("@1")]
+                    persisted_spec = {**local["semantic_spec"], **local["render_spec"]}
                     saved = await store.save_chart_spec(
                         title=local["presentation"]["title"],
-                        chart_spec=local["render_spec"],
+                        chart_spec=persisted_spec,
                         idempotency_key=f"{task.idempotency_key}:{local_ref}",
                         dataset_hash=local["dataset"]["dataset_hash"],
                         lineage={"input_artifact_refs": local["lineage"]},

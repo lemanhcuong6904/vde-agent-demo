@@ -3,6 +3,7 @@ import type { VisualizationSpec } from "vega-embed";
 import type { ChartSpecDTO } from "../../api/types";
 import { useChart, useChartSpec } from "../../api/queries";
 import { ArtifactLink } from "../ArtifactLink";
+import { ChartAudit } from "./ChartAudit";
 
 /** Vega-Lite chart (`GET /api/charts/{id}`) rendered with vega-embed (loaded lazily). */
 export function chartSpecMetadata(
@@ -67,6 +68,7 @@ export function ChartView({ id }: { id: string }) {
         )}
       </figcaption>
       <div className="chart-canvas" ref={container} />
+      {isImmutable && immutableQuery.data && <ChartAudit chart={immutableQuery.data} />}
       {error && <div className="error-text">Chart failed to render: {error}</div>}
     </figure>
   );

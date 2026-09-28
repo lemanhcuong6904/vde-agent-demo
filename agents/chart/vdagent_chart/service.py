@@ -14,6 +14,8 @@ from .llm import VisualReasoner
 from .policy import load_policy
 from .profile import profile_target
 from .schema import normalize_artifact
+from .spec_builder import build_semantic_spec
+from .output_validation import validate_chart_spec
 from .presentation import build_presentation
 from .selection import select_chart
 from .telemetry import TelemetryPort
@@ -63,7 +65,7 @@ class ChartAgentService:
                     (llm_suggestions or {}).get(target.target_id),
                     profile_target(target_context, binding),
                 )
-                dataset = assemble_dataset(target, resolved, decision)
+                dataset = assemble_dataset(target_context, binding, decision)
             except ChartError as exc:
                 targets.append(TargetResult(target.target_id, "failed", reason_code=exc.code))
                 errors.append({"target_id": target.target_id, "code": exc.code, "message": exc.message})
@@ -72,7 +74,19 @@ class ChartAgentService:
             presentation = build_presentation(title, f"Snapshot {task.scope.snapshot_id or 'n/a'}")
             render_spec = build_vega_spec(decision["chart_type"], dataset["records"], presentation["title"])
             chart_id = f"chart_{task.task_id}_{target.target_id}"
-            content = {"chart_type": decision["chart_type"], "dataset": dataset, "render_spec": render_spec, "lineage": [f"{a['artifact_id']}@{a['version']}" for a in resolved]}
+            lineage = [f"{a['artifact_id']}@{a['version']}" for a in resolved]
+            semantic_spec = build_semantic_spec(
+                chart_id=chart_id, task_id=task.task_id, target_id=target.target_id,
+                chart_type=str(decision["chart_type"]), purpose=task.intent.purpose,
+                visual_question=target.visual_question, scope={"snapshot_id": task.scope.snapshot_id, "data_grain": task.scope.data_grain},
+                dataset=dataset, selection=decision, presentation=presentation,
+                lineage={"input_artifact_refs": lineage}, validation={"overall_result": "pass"},
+            )
+            semantic_spec["render_spec"] = render_spec
+            output = validate_chart_spec(semantic_spec)
+            if output["overall_result"] != "pass":
+                raise ChartError("OUT-001", "semantic chart spec failed output validation", "output")
+            content = {"chart_type": decision["chart_type"], "dataset": dataset, "render_spec": render_spec, "semantic_spec": semantic_spec, "lineage": lineage}
             content_hash = "sha256:" + hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
             self.artifacts[chart_id] = {"artifact_id": chart_id, "version": 1, "status": "validated", **content, "content_hash": content_hash, "selection": decision, "presentation": presentation}
             refs.append(f"{chart_id}@1")
