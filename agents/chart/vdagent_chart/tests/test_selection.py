@@ -20,6 +20,14 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(decision["chart_type"], "line")
         self.assertEqual(decision["reason_code"], "SEL_POLICY_VISUAL_QUESTION")
 
+    def test_accepts_area_as_a_policy_compatible_trend_representation(self) -> None:
+        policy = load_policy("chart-policy/demo-1.0")
+
+        decision = select_chart(VisualTarget("a", "trend", preferred_chart_type="area"), policy)
+
+        self.assertEqual(decision["chart_type"], "area")
+        self.assertEqual(decision["reason_code"], "SEL_PREFERENCE_ACCEPTED")
+
     def test_supports_the_complete_visual_question_catalog(self) -> None:
         policy = load_policy("chart-policy/demo-1.0")
         cases = {
