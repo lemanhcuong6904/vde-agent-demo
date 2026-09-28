@@ -10,6 +10,16 @@ from vdagent_chart.service import ChartAgentService
 from vdagent_chart.telemetry import InMemoryTelemetry
 
 
+def test_telemetry_removes_sensitive_keys_and_values():
+    from vdagent_chart.telemetry import safe_attributes
+
+    attributes = safe_attributes(
+        {"status": "success", "prompt": "ignore this", "api_key": "sk-secret", "trace_id": "trace-1", "note": "a@b.com"}
+    )
+
+    assert attributes == {"status": "success", "trace_id": "trace-1"}
+
+
 class FailingReasoner:
     async def suggest(self, visual_question: str, allowed_chart_types: tuple[str, ...]) -> str | None:
         raise TimeoutError("provider unavailable")

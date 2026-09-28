@@ -16,12 +16,27 @@ an OpenAI-compatible endpoint. The LLM is optional: if the key is absent or the
 provider times out, the policy selects the same safe deterministic chart.
 
 ```powershell
-$env:PYTHONPATH = "agents/chart"
+$env:PYTHONPATH = "sdk;backend;agents/orchestrator;agents/data;agents/compare;agents/insight;agents/report;agents/chart"
 .\.venv\Scripts\python.exe -m pytest agents\chart\vdagent_chart\tests -q
 ```
 
-Start the backend with `make backend`, then select the **chart** agent and send one
-of these messages:
+Start the backend (no `make` or `uv` installation is required), then open
+`http://127.0.0.1:8000`, select the **chart** agent, and send one of these messages:
+
+```powershell
+$env:PYTHONPATH = "sdk;backend;agents/orchestrator;agents/data;agents/compare;agents/insight;agents/report;agents/chart"
+.\.venv\Scripts\python.exe -m uvicorn vdagent_backend.app:app --host 127.0.0.1 --port 8000
+```
+
+If you want a fresh local demo database first, run:
+
+```powershell
+Remove-Item .\var\backend.db, .\var\backend.db-wal, .\var\backend.db-shm, .\var\warehouse.db, .\var\warehouse.db-wal, .\var\warehouse.db-shm -Force -ErrorAction SilentlyContinue
+.\.venv\Scripts\python.exe data\seed_warehouse.py var\warehouse.db
+.\.venv\Scripts\python.exe data\seed_users.py var\backend.db
+```
+
+Then send one of these messages:
 
 | Command | Chart question | Source fixture |
 | --- | --- | --- |

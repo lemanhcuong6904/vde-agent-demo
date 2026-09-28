@@ -20,7 +20,7 @@ from .presentation import build_presentation
 from .selection import select_chart
 from .telemetry import TelemetryPort
 from .validation import validate_input
-from .vega import build_vega_spec
+from .vega import render_vega
 
 
 class ChartAgentService:
@@ -72,7 +72,6 @@ class ChartAgentService:
                 continue
             title = f"{target.visual_question.replace('_', ' ').title()} — VHop"
             presentation = build_presentation(title, f"Snapshot {task.scope.snapshot_id or 'n/a'}")
-            render_spec = build_vega_spec(decision["chart_type"], dataset["records"], presentation["title"])
             chart_id = f"chart_{task.task_id}_{target.target_id}"
             lineage = [f"{a['artifact_id']}@{a['version']}" for a in resolved]
             semantic_spec = build_semantic_spec(
@@ -82,10 +81,11 @@ class ChartAgentService:
                 dataset=dataset, selection=decision, presentation=presentation,
                 lineage={"input_artifact_refs": lineage}, validation={"overall_result": "pass"},
             )
-            semantic_spec["render_spec"] = render_spec
             output = validate_chart_spec(semantic_spec)
             if output["overall_result"] != "pass":
                 raise ChartError("OUT-001", "semantic chart spec failed output validation", "output")
+            render_spec = render_vega(semantic_spec)
+            semantic_spec["render_spec"] = render_spec
             content = {"chart_type": decision["chart_type"], "dataset": dataset, "render_spec": render_spec, "semantic_spec": semantic_spec, "lineage": lineage}
             content_hash = "sha256:" + hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
             self.artifacts[chart_id] = {"artifact_id": chart_id, "version": 1, "status": "validated", **content, "content_hash": content_hash, "selection": decision, "presentation": presentation}
@@ -104,7 +104,14 @@ class ChartAgentService:
 
     async def execute_async(self, task: ChartTaskInput) -> ChartTaskResult:
         """Run optional bounded LLM advice, then the deterministic workflow."""
-        self._record("chart.started", {"target_count": len(task.visual_targets)})
+        event_context = {
+            "trace_id": task.trace_context.get("trace_id", task.run_id),
+            "task_id": task.task_id,
+            "policy_version": task.policy_ref,
+            "validator_version": "chart-spec/2.0",
+            "renderer_version": "vega-lite/v5",
+        }
+        self._record("chart.started", {**event_context, "target_count": len(task.visual_targets)})
         suggestions: dict[str, str | None] = {}
         if self._reasoner is not None:
             policy = load_policy(task.policy_ref)
@@ -115,11 +122,11 @@ class ChartAgentService:
                     )
                 except Exception:
                     suggestions[target.target_id] = None
-                    self._record("chart.llm.unavailable", {"target_count": 1})
+                    self._record("chart.llm.unavailable", {**event_context, "target_count": 1})
         result = self.execute(task, suggestions)
         self._record(
             "chart.completed",
-            {"status": result.status, "artifact_count": len(result.chart_artifacts)},
+            {**event_context, "status": result.status, "artifact_count": len(result.chart_artifacts)},
         )
         return result
 

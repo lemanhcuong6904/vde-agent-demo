@@ -85,13 +85,15 @@ CREATE TABLE IF NOT EXISTS charts (
 );
 
 -- Immutable Chart Agent output.  A retry with the same owner/key returns this
--- exact version; changing its content requires a new idempotency key.
+-- exact revision; a changed semantic body under the same logical chart gets a
+-- new immutable version.
 CREATE TABLE IF NOT EXISTS chart_specs (
   id              TEXT PRIMARY KEY,           -- 'csp_…'
   user_id         TEXT NOT NULL REFERENCES users(id),
   invocation_id   TEXT NOT NULL REFERENCES invocations(id),
   idempotency_key TEXT NOT NULL,
-  version         INTEGER NOT NULL DEFAULT 1 CHECK (version = 1),
+  logical_chart_id TEXT NOT NULL,
+  version         INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
   status          TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('ready','failed')),
   title           TEXT NOT NULL,
   chart_spec_json TEXT NOT NULL,
@@ -104,6 +106,16 @@ CREATE TABLE IF NOT EXISTS chart_specs (
   UNIQUE(user_id, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS ix_chart_specs_user ON chart_specs(user_id, created_at);
+
+-- A content-deduplicated retry can point at an existing immutable revision
+-- while still reserving its caller-provided idempotency key.
+CREATE TABLE IF NOT EXISTS chart_spec_idempotency_keys (
+  user_id         TEXT NOT NULL REFERENCES users(id),
+  idempotency_key TEXT NOT NULL,
+  chart_spec_id   TEXT NOT NULL REFERENCES chart_specs(id),
+  content_hash    TEXT NOT NULL,
+  PRIMARY KEY (user_id, idempotency_key)
+);
 
 CREATE TABLE IF NOT EXISTS reports (
   id            TEXT PRIMARY KEY,             -- 'rp_…'

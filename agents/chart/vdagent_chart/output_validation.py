@@ -21,6 +21,20 @@ def validate_chart_spec(spec: dict[str, Any]) -> dict[str, Any]:
         isinstance(dataset, dict) and "records" in dataset and "dataset_hash" in dataset
     )
     checks.append("dataset")
+    scope = spec.get("scope", {})
+    valid_scope = isinstance(scope, dict) and bool(scope.get("snapshot_id"))
+    dataset_grain = dataset.get("grain") if isinstance(dataset, dict) else None
+    if dataset_grain is not None and dataset_grain != scope.get("data_grain"):
+        valid_scope = False
+    checks.append("scope")
+    encoding = spec.get("encoding", {})
+    valid_renderer = (
+        isinstance(encoding, dict)
+        and bool(encoding)
+        and isinstance(spec.get("chart_type"), str)
+        and bool(spec.get("chart_type"))
+    )
+    checks.append("renderer")
     title = str(spec.get("presentation", {}).get("title", ""))
     valid_presentation = not _UNSAFE_PRESENTATION.search(title)
     checks.append("presentation")
@@ -30,6 +44,8 @@ def validate_chart_spec(spec: dict[str, Any]) -> dict[str, Any]:
             ("schema", valid_schema),
             ("lineage", valid_lineage),
             ("dataset", valid_dataset),
+            ("scope", valid_scope),
+            ("renderer", valid_renderer),
             ("presentation", valid_presentation),
         )
         if not valid

@@ -122,6 +122,7 @@ export interface ChartDTO {
 /** Immutable artifact emitted by the Chart Agent (`GET /api/chart-specs/{id}`). */
 export interface ChartSpecDTO {
   id: string;
+  logical_chart_id: string;
   version: number;
   status: "ready" | "failed";
   title: string;

@@ -3,7 +3,13 @@ import type { ChartSpecDTO } from "../../api/types";
 export function chartAuditLines(chart: ChartSpecDTO): string[] {
   const refs = Array.isArray(chart.lineage.input_artifact_refs) ? chart.lineage.input_artifact_refs : [];
   const checks = Array.isArray(chart.validation.checks) ? chart.validation.checks : [];
-  return [`Dataset: ${chart.dataset_hash}`, `Inputs: ${refs.length}`, `Validation: ${checks.join(", ") || "not recorded"}`, ...chart.limitations.map((item) => `Limitation: ${item}`)];
+  return [
+    `Chart: ${chart.logical_chart_id} (revision ${chart.version})`,
+    `Dataset: ${chart.dataset_hash}`,
+    `Inputs: ${refs.length}`,
+    `Validation: ${checks.join(", ") || "not recorded"}`,
+    ...chart.limitations.map((item) => `Limitation: ${item}`),
+  ];
 }
 
 export function ChartAudit({ chart }: { chart: ChartSpecDTO }) {

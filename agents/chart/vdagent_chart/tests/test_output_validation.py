@@ -15,3 +15,19 @@ def test_rejects_causal_or_pii_presentation_text():
     outcome = validate_chart_spec(spec)
     assert outcome["overall_result"] == "fail"
     assert "presentation" in outcome["failures"]
+
+
+def test_rejects_dataset_with_a_grain_that_conflicts_with_scope():
+    spec = {
+        "schema_version": "chart-spec/2.0",
+        "scope": {"snapshot_id": "2026-06-30", "data_grain": "month"},
+        "dataset": {"records": [{"month": "2026-01", "value": 1}], "dataset_hash": "sha256:x", "grain": "unit"},
+        "encoding": {"x": {"field": "month"}, "y": {"field": "value"}},
+        "lineage": {"input_artifact_refs": ["metric_x@1"]},
+        "presentation": {"title": "Monthly value"},
+    }
+
+    outcome = validate_chart_spec(spec)
+
+    assert outcome["overall_result"] == "fail"
+    assert "scope" in outcome["failures"]

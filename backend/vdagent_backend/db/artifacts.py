@@ -31,6 +31,7 @@ class InvocationArtifactStore:
         chart_spec: dict[str, Any],
         idempotency_key: str,
         dataset_hash: str,
+        logical_chart_id: str | None = None,
         lineage: dict[str, Any] | None = None,
         validation: dict[str, Any] | None = None,
         limitations: list[str] | None = None,
@@ -43,6 +44,7 @@ class InvocationArtifactStore:
             chart_spec=chart_spec,
             idempotency_key=idempotency_key,
             dataset_hash=dataset_hash,
+            logical_chart_id=logical_chart_id,
             lineage=lineage,
             validation=validation,
             limitations=limitations,
@@ -78,6 +80,7 @@ def _canonical_chart_spec(
 def _chart_spec_row(row: Any) -> dict[str, Any]:
     return {
         "id": row.id,
+        "logical_chart_id": row.logical_chart_id,
         "version": row.version,
         "status": row.status,
         "title": row.title,
@@ -100,6 +103,7 @@ async def insert_chart_spec(
     chart_spec: dict[str, Any],
     idempotency_key: str,
     dataset_hash: str,
+    logical_chart_id: str | None = None,
     lineage: dict[str, Any] | None = None,
     validation: dict[str, Any] | None = None,
     limitations: list[str] | None = None,
@@ -111,6 +115,9 @@ async def insert_chart_spec(
     """
     if not idempotency_key.strip():
         raise ValueError("idempotency key must not be empty")
+    logical_chart_id = logical_chart_id or str(chart_spec.get("chart_id") or idempotency_key)
+    if not logical_chart_id.strip():
+        raise ValueError("logical chart id must not be empty")
     lineage = lineage or {}
     validation = validation or {}
     limitations = limitations or []
@@ -118,10 +125,25 @@ async def insert_chart_spec(
         chart_spec, dataset_hash, title, lineage, validation, limitations
     )
     async with db.begin() as conn:
+        aliased = (
+            await conn.execute(
+                text(
+                    "SELECT s.id, s.logical_chart_id, s.version, s.status, s.title, s.chart_spec_json, s.dataset_hash, "
+                    "s.lineage_json, s.validation_json, s.limitations_json, s.content_hash, s.created_at "
+                    "FROM chart_spec_idempotency_keys k JOIN chart_specs s ON s.id = k.chart_spec_id "
+                    "WHERE k.user_id = :user_id AND k.idempotency_key = :idempotency_key"
+                ),
+                {"user_id": user_id, "idempotency_key": idempotency_key},
+            )
+        ).first()
+        if aliased is not None:
+            if aliased.content_hash != content_hash:
+                raise ValueError("idempotency key already belongs to different chart content")
+            return _chart_spec_row(aliased)
         existing = (
             await conn.execute(
                 text(
-                    "SELECT id, version, status, title, chart_spec_json, dataset_hash, lineage_json, validation_json,"
+                    "SELECT id, logical_chart_id, version, status, title, chart_spec_json, dataset_hash, lineage_json, validation_json,"
                     " limitations_json, content_hash, created_at"
                     " FROM chart_specs WHERE user_id = :user_id AND idempotency_key = :idempotency_key"
                 ),
@@ -133,12 +155,48 @@ async def insert_chart_spec(
                 raise ValueError("idempotency key already belongs to different chart content")
             return _chart_spec_row(existing)
 
+        same_content = (
+            await conn.execute(
+                text(
+                    "SELECT id, logical_chart_id, version, status, title, chart_spec_json, dataset_hash, lineage_json, validation_json,"
+                    " limitations_json, content_hash, created_at FROM chart_specs "
+                    "WHERE user_id = :user_id AND logical_chart_id = :logical_chart_id AND content_hash = :content_hash"
+                ),
+                {"user_id": user_id, "logical_chart_id": logical_chart_id, "content_hash": content_hash},
+            )
+        ).first()
+        if same_content is not None:
+            await conn.execute(
+                text(
+                    "INSERT INTO chart_spec_idempotency_keys "
+                    "(user_id, idempotency_key, chart_spec_id, content_hash) "
+                    "VALUES (:user_id, :idempotency_key, :chart_spec_id, :content_hash)"
+                ),
+                {
+                    "user_id": user_id,
+                    "idempotency_key": idempotency_key,
+                    "chart_spec_id": same_content.id,
+                    "content_hash": content_hash,
+                },
+            )
+            return _chart_spec_row(same_content)
+
+        version = (
+            await conn.execute(
+                text(
+                    "SELECT COALESCE(MAX(version), 0) FROM chart_specs "
+                    "WHERE user_id = :user_id AND logical_chart_id = :logical_chart_id"
+                ),
+                {"user_id": user_id, "logical_chart_id": logical_chart_id},
+            )
+        ).scalar_one() + 1
+
         chart_spec_id = new_id("csp")
         await conn.execute(
             text(
-                "INSERT INTO chart_specs (id, user_id, invocation_id, idempotency_key, title, chart_spec_json,"
+                "INSERT INTO chart_specs (id, user_id, invocation_id, idempotency_key, logical_chart_id, version, title, chart_spec_json,"
                 " dataset_hash, lineage_json, validation_json, limitations_json, content_hash)"
-                " VALUES (:id, :user_id, :invocation_id, :idempotency_key, :title, :chart_spec_json,"
+                " VALUES (:id, :user_id, :invocation_id, :idempotency_key, :logical_chart_id, :version, :title, :chart_spec_json,"
                 " :dataset_hash, :lineage_json, :validation_json, :limitations_json, :content_hash)"
             ),
             {
@@ -146,12 +204,27 @@ async def insert_chart_spec(
                 "user_id": user_id,
                 "invocation_id": invocation_id,
                 "idempotency_key": idempotency_key,
+                "logical_chart_id": logical_chart_id,
+                "version": version,
                 "title": title,
                 "chart_spec_json": spec_json,
                 "dataset_hash": dataset_hash,
                 "lineage_json": json.dumps(lineage, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
                 "validation_json": json.dumps(validation, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
                 "limitations_json": json.dumps(limitations, ensure_ascii=False, separators=(",", ":")),
+                "content_hash": content_hash,
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO chart_spec_idempotency_keys "
+                "(user_id, idempotency_key, chart_spec_id, content_hash) "
+                "VALUES (:user_id, :idempotency_key, :chart_spec_id, :content_hash)"
+            ),
+            {
+                "user_id": user_id,
+                "idempotency_key": idempotency_key,
+                "chart_spec_id": chart_spec_id,
                 "content_hash": content_hash,
             },
         )
@@ -166,7 +239,7 @@ async def get_chart_spec(db: AsyncEngine, user_id: str, chart_spec_id: str) -> d
         row = (
             await conn.execute(
                 text(
-                    "SELECT id, version, status, title, chart_spec_json, dataset_hash, lineage_json, validation_json,"
+                    "SELECT id, logical_chart_id, version, status, title, chart_spec_json, dataset_hash, lineage_json, validation_json,"
                     " limitations_json, content_hash, created_at"
                     " FROM chart_specs WHERE id = :id AND user_id = :user_id"
                 ),

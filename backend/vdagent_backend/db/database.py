@@ -28,16 +28,56 @@ def apply_schema(path: str) -> None:
 
 
 def _upgrade_chart_specs(conn: sqlite3.Connection) -> None:
-    """Add audit metadata to databases created before immutable ChartSpec v2."""
+    """Upgrade immutable ChartSpec storage without discarding existing revisions."""
     existing = {row[1] for row in conn.execute("PRAGMA table_info(chart_specs)")}
     additions = {
         "lineage_json": "TEXT NOT NULL DEFAULT '{}'",
         "validation_json": "TEXT NOT NULL DEFAULT '{}'",
         "limitations_json": "TEXT NOT NULL DEFAULT '[]'",
+        "logical_chart_id": "TEXT",
     }
     for name, definition in additions.items():
         if name not in existing:
             conn.execute(f"ALTER TABLE chart_specs ADD COLUMN {name} {definition}")
+    conn.execute(
+        "UPDATE chart_specs SET logical_chart_id = idempotency_key "
+        "WHERE logical_chart_id IS NULL OR logical_chart_id = ''"
+    )
+    table_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chart_specs'"
+    ).fetchone()[0].lower()
+    if "version = 1" not in table_sql:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_chart_specs_logical "
+            "ON chart_specs(user_id, logical_chart_id, version)"
+        )
+        return
+
+    conn.execute("ALTER TABLE chart_specs RENAME TO chart_specs_legacy")
+    conn.execute(
+        "CREATE TABLE chart_specs ("
+        "id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), "
+        "invocation_id TEXT NOT NULL REFERENCES invocations(id), idempotency_key TEXT NOT NULL, "
+        "logical_chart_id TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1), "
+        "status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('ready','failed')), title TEXT NOT NULL, "
+        "chart_spec_json TEXT NOT NULL, dataset_hash TEXT NOT NULL, lineage_json TEXT NOT NULL DEFAULT '{}', "
+        "validation_json TEXT NOT NULL DEFAULT '{}', limitations_json TEXT NOT NULL DEFAULT '[]', "
+        "content_hash TEXT NOT NULL, created_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO chart_specs (id, user_id, invocation_id, idempotency_key, logical_chart_id, version, "
+        "status, title, chart_spec_json, dataset_hash, lineage_json, validation_json, limitations_json, "
+        "content_hash, created_at) "
+        "SELECT id, user_id, invocation_id, idempotency_key, logical_chart_id, version, status, title, "
+        "chart_spec_json, dataset_hash, lineage_json, validation_json, limitations_json, content_hash, created_at "
+        "FROM chart_specs_legacy"
+    )
+    conn.execute("DROP TABLE chart_specs_legacy")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_chart_specs_user ON chart_specs(user_id, created_at)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_chart_specs_logical "
+        "ON chart_specs(user_id, logical_chart_id, version)"
+    )
 
 
 def _set_pragmas(dbapi_conn, _record) -> None:  # noqa: ANN001

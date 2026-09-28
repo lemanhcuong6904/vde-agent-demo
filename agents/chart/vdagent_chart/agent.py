@@ -39,6 +39,7 @@ class ChartPluginAgent:
                         title=local["presentation"]["title"],
                         chart_spec=persisted_spec,
                         idempotency_key=f"{task.idempotency_key}:{local_ref}",
+                        logical_chart_id=local["semantic_spec"]["chart_id"],
                         dataset_hash=local["dataset"]["dataset_hash"],
                         lineage={"input_artifact_refs": local["lineage"]},
                         validation={"overall_result": "pass"},

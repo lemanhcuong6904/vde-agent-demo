@@ -101,3 +101,62 @@ async def test_invocation_artifact_store_persists_chart_spec_for_its_owner(harne
 
     assert stored["id"].startswith("csp_")
     assert await artifacts.get_chart_spec(harness.db, BOB, stored["id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_changed_semantic_content_creates_immutable_revision(harness) -> None:
+    task_id = await harness.post("data", "prepare a chart")
+    await harness.wait_task(task_id, "completed")
+    invocation_id = (await harness.invocations(task_id))[0]["id"]
+    common = {
+        "user_id": ALICE,
+        "invocation_id": invocation_id,
+        "title": "Price trend",
+        "dataset_hash": "sha256:dataset",
+        "logical_chart_id": "chart_price_trend_target",
+    }
+
+    first = await artifacts.insert_chart_spec(
+        harness.db,
+        **common,
+        chart_spec={"schema_version": "chart-spec/2.0", "chart_type": "line"},
+        idempotency_key="price-trend:attempt-1",
+    )
+    revised = await artifacts.insert_chart_spec(
+        harness.db,
+        **common,
+        chart_spec={"schema_version": "chart-spec/2.0", "chart_type": "area"},
+        idempotency_key="price-trend:attempt-2",
+    )
+
+    assert first["id"] != revised["id"]
+    assert first["version"] == 1
+    assert revised["version"] == 2
+    assert revised["logical_chart_id"] == "chart_price_trend_target"
+    assert (await artifacts.get_chart_spec(harness.db, ALICE, first["id"]))["chart_spec"]["chart_type"] == "line"
+
+
+@pytest.mark.asyncio
+async def test_content_deduplicated_retry_key_remains_reserved(harness) -> None:
+    task_id = await harness.post("data", "prepare a chart")
+    await harness.wait_task(task_id, "completed")
+    invocation_id = (await harness.invocations(task_id))[0]["id"]
+    common = {
+        "user_id": ALICE,
+        "invocation_id": invocation_id,
+        "title": "Price trend",
+        "dataset_hash": "sha256:dataset",
+        "logical_chart_id": "chart_price_trend_target",
+    }
+    first = await artifacts.insert_chart_spec(
+        harness.db, **common, chart_spec={"chart_type": "line"}, idempotency_key="original"
+    )
+    repeated = await artifacts.insert_chart_spec(
+        harness.db, **common, chart_spec={"chart_type": "line"}, idempotency_key="alias"
+    )
+
+    assert repeated["id"] == first["id"]
+    with pytest.raises(ValueError, match="idempotency key"):
+        await artifacts.insert_chart_spec(
+            harness.db, **common, chart_spec={"chart_type": "area"}, idempotency_key="alias"
+        )
