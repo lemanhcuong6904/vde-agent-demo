@@ -1,31 +1,36 @@
-"""This agent's brain: a thin tool-calling loop over LiteLLM with the Backend's MCP tools.
+"""This agent's brain: a LangChain 1.x agent (`create_agent`) with the Backend's MCP tools.
 
-Per turn: open an MCP session, offer its tools plus `send_to_agent`, and step the model up to
-`ctx.max_steps` times (`tool_choice="none"` on the last step). Every assistant step and tool
-result is reported through `ctx`; tool calls of one step run concurrently.
+Per turn: open an MCP session, build the tools (MCP + `send_to_agent`) and a fresh agent whose
+middleware maps LangChain's loop onto the turn contract (`CtxBridge`, see bridge.py). LangChain runs
+the loop; the tool calls of one step run concurrently.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
 
-from vdagent_sdk import SEND_TO_AGENT, Agent, AgentTimeoutError, InvocationContext, Message, Peer, ToolCall
+import openai
+from langchain.agents import create_agent
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+from vdagent_sdk import Agent, AgentTimeoutError, InvocationContext, Message
 
-from .llm import AssistantMessage, LiteLLMClient, LLMClient, LLMTimeoutError, ToolChoice
-from .mcp_client import McpSession, McpSessionFactory, open_mcp_session, openai_tool_schema, run_mcp_tool
-from .settings import load_settings
+from .bridge import STEP_LIMIT_TEXT, CtxBridge
+from .mcp_client import McpSessionFactory, open_mcp_session
+from .settings import DEFAULT_LLM_TIMEOUT_S, load_settings
+from .tools import build_tools
+
+__all__ = ["DESCRIPTION", "NAME", "STEP_LIMIT_TEXT", "LangChainAgent", "build_agent"]
 
 NAME = "insight"
 DESCRIPTION = "Explains trends, anomalies and drivers."
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 SUMMARY_HEADING = "## Summary of earlier work with this user"
-STEP_LIMIT_TEXT = "[step limit reached before I could finish; no further tool calls were made]"
 COMPACT_TOOL_TEXT_CHARS = 2_000
 
 
@@ -37,31 +42,6 @@ def build_system_prompt(prompt: str, summary: str) -> str:
     if not summary.strip():
         return prompt
     return f"{prompt}\n\n{SUMMARY_HEADING}\n{summary.strip()}"
-
-
-def send_to_agent_tool(peers: Sequence[Peer]) -> dict[str, Any]:
-    roster = "\n".join(f"- {p.name}: {p.description}" for p in peers)
-    return {
-        "type": "function",
-        "function": {
-            "name": SEND_TO_AGENT,
-            "description": (
-                "Send a message to another agent and wait for its reply. "
-                f"The reply is returned as this tool's result. Agents:\n{roster}"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "agent": {"type": "string", "enum": [p.name for p in peers]},
-                    "message": {
-                        "type": "string",
-                        "description": "Self-contained request, including any dataset ids it needs.",
-                    },
-                },
-                "required": ["agent", "message"],
-            },
-        },
-    }
 
 
 def render_for_compaction(previous_summary: str, messages: Sequence[Message]) -> str:
@@ -82,124 +62,60 @@ def render_for_compaction(previous_summary: str, messages: Sequence[Message]) ->
     return "\n".join(lines)
 
 
-class LiteLLMAgent:
+class LangChainAgent:
     def __init__(
         self,
         *,
-        llm: LLMClient,
+        model: BaseChatModel,
         mcp_session_factory: McpSessionFactory = open_mcp_session,
         system_prompt: str,
         compact_prompt: str,
+        timeout_s: float = DEFAULT_LLM_TIMEOUT_S,
     ) -> None:
-        self._llm = llm
+        self._model = model
         self._mcp_session_factory = mcp_session_factory
         self._system_prompt = system_prompt
         self._compact_prompt = compact_prompt
-
-    async def _complete(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], tool_choice: ToolChoice
-    ) -> AssistantMessage:
-        try:
-            return await self._llm.complete(messages, tools, tool_choice)
-        except LLMTimeoutError as exc:
-            raise AgentTimeoutError(str(exc)) from exc
+        self._timeout_s = timeout_s
 
     async def invoke(self, ctx: InvocationContext) -> None:
         async with self._mcp_session_factory(ctx.mcp.url, ctx.mcp.token) as mcp:
-            await _Turn(ctx, mcp, self._system_prompt, self._complete).run()
+            agent = create_agent(
+                self._model,
+                build_tools(mcp, await mcp.list_tools(), ctx.peers),
+                system_prompt=build_system_prompt(self._system_prompt, ctx.summary),
+                middleware=[CtxBridge(ctx, self._timeout_s)],
+            )
+            # Each step passes through a few graph nodes; the step budget itself is CtxBridge's.
+            await agent.ainvoke({"messages": ctx.history}, {"recursion_limit": 4 * ctx.max_steps + 10})
 
     async def compact(self, previous_summary: str, messages: list[Message]) -> str:
-        reply = await self._complete(
-            [
-                {"role": "system", "content": self._compact_prompt},
-                {"role": "user", "content": render_for_compaction(previous_summary, messages)},
-            ],
-            [],
-            "none",
-        )
-        return reply.content.strip()
-
-
-class _Turn:
-    """State of one `invoke` (kept off the agent object: one agent serves concurrent turns)."""
-
-    def __init__(
-        self,
-        ctx: InvocationContext,
-        mcp: McpSession,
-        system_prompt: str,
-        complete: Callable[[list[dict[str, Any]], list[dict[str, Any]], ToolChoice], Awaitable[AssistantMessage]],
-    ) -> None:
-        self._ctx = ctx
-        self._mcp = mcp
-        self._system_prompt = system_prompt
-        self._complete = complete
-        self._mcp_tool_names: set[str] = set()
-
-    async def run(self) -> None:
-        ctx = self._ctx
-        tools: list[dict[str, Any]] = []
-        for tool in await self._mcp.list_tools():
-            if tool.name == SEND_TO_AGENT:
-                continue
-            self._mcp_tool_names.add(tool.name)
-            tools.append(openai_tool_schema(tool))
-        if ctx.peers:
-            tools.append(send_to_agent_tool(ctx.peers))
-
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": build_system_prompt(self._system_prompt, ctx.summary)},
-            *ctx.history,
+        prompt = [
+            SystemMessage(self._compact_prompt),
+            HumanMessage(render_for_compaction(previous_summary, messages)),
         ]
-        for step in range(1, ctx.max_steps + 1):
-            last_step = step == ctx.max_steps
-            reply = await self._complete(messages, tools, "none" if last_step else "auto")
-            if last_step and reply.tool_calls:
-                # The model ignored tool_choice="none"; there is no step left to run the calls.
-                reply = AssistantMessage(content=reply.content or STEP_LIMIT_TEXT)
-            await ctx.emit_assistant(reply.content, reply.tool_calls)
-            messages.append(reply.to_openai())
-            if not reply.tool_calls:
-                return
-            async with asyncio.TaskGroup() as tg:
-                tasks = [tg.create_task(self._run_tool_call(tc)) for tc in reply.tool_calls]
-            for tc, task in zip(reply.tool_calls, tasks, strict=True):
-                messages.append({"role": "tool", "tool_call_id": tc.id, "content": task.result()})
-
-    async def _run_tool_call(self, tc: ToolCall) -> str:
-        content = await self._tool_content(tc)
-        await self._ctx.emit_tool_result(tc.id, content)
-        return content
-
-    async def _tool_content(self, tc: ToolCall) -> str:
         try:
-            arguments = json.loads(tc.arguments_json) if tc.arguments_json.strip() else {}
-        except json.JSONDecodeError as exc:
-            return f"error: invalid JSON arguments for '{tc.name}': {exc}"
-        if not isinstance(arguments, dict):
-            return f"error: arguments for '{tc.name}' must be a JSON object"
-
-        if tc.name == SEND_TO_AGENT and self._ctx.peers:
-            target, message = arguments.get("agent"), arguments.get("message")
-            if not isinstance(target, str) or not target.strip():
-                return "error: send_to_agent requires 'agent' (the name of the agent to call)"
-            if not isinstance(message, str) or not message.strip():
-                return "error: send_to_agent requires a non-empty 'message'"
-            return await self._ctx.call_agent(tc.id, target.strip(), message)
-        if tc.name in self._mcp_tool_names:
-            return await run_mcp_tool(self._mcp, tc.name, arguments)
-        return f"error: unknown tool '{tc.name}'"
+            async with asyncio.timeout(self._timeout_s):
+                reply = await self._model.ainvoke(prompt)
+        except (TimeoutError, openai.APITimeoutError) as exc:
+            raise AgentTimeoutError(f"model call timed out after {self._timeout_s:g}s") from exc
+        return reply.text.strip()
 
 
 def build_agent(env: Mapping[str, str]) -> Agent:
     """Raises `PluginConfigError` naming the missing or invalid setting."""
     settings = load_settings(env)
-    for noisy in ("httpx", "httpx2", "LiteLLM"):  # per-request INFO lines drown out agent logs
+    for noisy in ("httpx", "openai"):  # per-request INFO lines drown out agent logs
         logging.getLogger(noisy).setLevel(logging.WARNING)
-    llm = LiteLLMClient(
+    model = ChatOpenAI(
         model=settings.llm_model,
-        api_base=settings.openai_base_url,
+        base_url=settings.openai_base_url,
         api_key=settings.openai_api_key,
+        timeout=settings.llm_timeout_s,
+    )
+    return LangChainAgent(
+        model=model,
+        system_prompt=load_prompt("system"),
+        compact_prompt=load_prompt("compact"),
         timeout_s=settings.llm_timeout_s,
     )
-    return LiteLLMAgent(llm=llm, system_prompt=load_prompt("system"), compact_prompt=load_prompt("compact"))
