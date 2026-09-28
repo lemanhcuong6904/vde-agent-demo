@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 from typing import Any
+import re
+
+_UNSAFE_PRESENTATION = re.compile(r"\b(causes?|caused|because|therefore)\b|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", re.I)
 
 
 def validate_chart_spec(spec: dict[str, Any]) -> dict[str, Any]:
@@ -18,12 +21,16 @@ def validate_chart_spec(spec: dict[str, Any]) -> dict[str, Any]:
         isinstance(dataset, dict) and "records" in dataset and "dataset_hash" in dataset
     )
     checks.append("dataset")
+    title = str(spec.get("presentation", {}).get("title", ""))
+    valid_presentation = not _UNSAFE_PRESENTATION.search(title)
+    checks.append("presentation")
     failures = [
         name
         for name, valid in (
             ("schema", valid_schema),
             ("lineage", valid_lineage),
             ("dataset", valid_dataset),
+            ("presentation", valid_presentation),
         )
         if not valid
     ]
