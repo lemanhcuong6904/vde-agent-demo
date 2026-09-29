@@ -3,6 +3,7 @@ from __future__ import annotations
 from vdagent_sdk import InvocationContext, Message
 
 from .fixtures import load_demo_task
+from .runtime import canonical_input_hash
 from .service import ChartAgentService
 
 NAME = "chart"
@@ -35,15 +36,28 @@ class ChartPluginAgent:
                 for local_ref in result.chart_artifacts:
                     local = self._service.artifacts[local_ref.removesuffix("@1")]
                     persisted_spec = {**local["semantic_spec"], **local["render_spec"]}
+                    lineage = {"input_artifact_refs": local["lineage"]}
+                    validation = {"overall_result": "pass"}
+                    limitations = list(local.get("limitations", ()))
+                    content_key = canonical_input_hash(
+                        {
+                            "chart_spec": persisted_spec,
+                            "dataset_hash": local["dataset"]["dataset_hash"],
+                            "title": local["presentation"]["title"],
+                            "lineage": lineage,
+                            "validation": validation,
+                            "limitations": limitations,
+                        }
+                    )
                     saved = await store.save_chart_spec(
                         title=local["presentation"]["title"],
                         chart_spec=persisted_spec,
-                        idempotency_key=f"{task.idempotency_key}:{local_ref}",
+                        idempotency_key=f"{task.idempotency_key}:{local_ref}:{content_key}",
                         logical_chart_id=local["semantic_spec"]["chart_id"],
                         dataset_hash=local["dataset"]["dataset_hash"],
-                        lineage={"input_artifact_refs": local["lineage"]},
-                        validation={"overall_result": "pass"},
-                        limitations=list(local.get("limitations", ())),
+                        lineage=lineage,
+                        validation=validation,
+                        limitations=limitations,
                     )
                     refs.append(f"{saved['id']}@{saved['version']}")
             await ctx.emit_assistant("Created chart artifact: " + ", ".join(refs))

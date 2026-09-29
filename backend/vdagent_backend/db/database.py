@@ -49,16 +49,14 @@ def _upgrade_chart_specs(conn: sqlite3.Connection) -> None:
     columns = {row[1]: row for row in conn.execute("PRAGMA table_info(chart_specs)")}
     missing_timestamp_default = not columns["created_at"][4]
     if "version = 1" not in table_sql and not missing_timestamp_default:
+        _repair_chart_spec_idempotency_aliases(conn)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS ix_chart_specs_logical "
             "ON chart_specs(user_id, logical_chart_id, version)"
         )
         return
 
-    alias_rows = conn.execute(
-        "SELECT user_id, idempotency_key, chart_spec_id, content_hash "
-        "FROM chart_spec_idempotency_keys"
-    ).fetchall()
+    alias_rows = _chart_spec_idempotency_alias_rows(conn)
     # SQLite rewrites foreign-key targets during ALTER TABLE ... RENAME.  Drop
     # and recreate this dependent table so it never keeps chart_specs_legacy.
     conn.execute("DROP TABLE chart_spec_idempotency_keys")
@@ -84,10 +82,7 @@ def _upgrade_chart_specs(conn: sqlite3.Connection) -> None:
     )
     conn.execute("DROP TABLE chart_specs_legacy")
     conn.execute(
-        "CREATE TABLE chart_spec_idempotency_keys ("
-        "user_id TEXT NOT NULL REFERENCES users(id), idempotency_key TEXT NOT NULL, "
-        "chart_spec_id TEXT NOT NULL REFERENCES chart_specs(id), content_hash TEXT NOT NULL, "
-        "PRIMARY KEY (user_id, idempotency_key))"
+        _CHART_SPEC_IDEMPOTENCY_KEYS_SQL
     )
     conn.executemany(
         "INSERT INTO chart_spec_idempotency_keys "
@@ -98,6 +93,39 @@ def _upgrade_chart_specs(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS ix_chart_specs_logical "
         "ON chart_specs(user_id, logical_chart_id, version)"
+    )
+
+
+_CHART_SPEC_IDEMPOTENCY_KEYS_SQL = (
+    "CREATE TABLE chart_spec_idempotency_keys ("
+    "user_id TEXT NOT NULL REFERENCES users(id), idempotency_key TEXT NOT NULL, "
+    "chart_spec_id TEXT NOT NULL REFERENCES chart_specs(id), content_hash TEXT NOT NULL, "
+    "PRIMARY KEY (user_id, idempotency_key))"
+)
+
+
+def _chart_spec_idempotency_alias_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT user_id, idempotency_key, chart_spec_id, content_hash "
+        "FROM chart_spec_idempotency_keys"
+    ).fetchall()
+
+
+def _repair_chart_spec_idempotency_aliases(conn: sqlite3.Connection) -> None:
+    fk_targets = {
+        row[2]
+        for row in conn.execute("PRAGMA foreign_key_list(chart_spec_idempotency_keys)")
+        if row[3] == "chart_spec_id"
+    }
+    if fk_targets == {"chart_specs"}:
+        return
+    alias_rows = _chart_spec_idempotency_alias_rows(conn)
+    conn.execute("DROP TABLE chart_spec_idempotency_keys")
+    conn.execute(_CHART_SPEC_IDEMPOTENCY_KEYS_SQL)
+    conn.executemany(
+        "INSERT INTO chart_spec_idempotency_keys "
+        "(user_id, idempotency_key, chart_spec_id, content_hash) VALUES (?, ?, ?, ?)",
+        alias_rows,
     )
 
 
