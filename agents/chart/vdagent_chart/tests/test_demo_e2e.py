@@ -46,3 +46,16 @@ def test_documented_missing_dependency_returns_only_a_dependency_request():
     assert result.status == "failed"
     assert result.chart_artifacts == ()
     assert result.dependency_requests == ({"artifact_id": "metric_not_ready", "version": 1, "code": "DEP-002"},)
+
+
+def test_sales_funnel_demo_uses_funnel_projection_not_plain_vertical_bar():
+    service = ChartAgentService(FixtureArtifactStore.demo())
+
+    result = service.execute(load_demo_task("sales_funnel"))
+
+    artifact = service.artifacts[result.chart_artifacts[0].removesuffix("@1")]
+    render_spec = artifact["render_spec"]
+    assert render_spec["encoding"]["y"]["field"] == "stage"
+    assert render_spec["encoding"]["x"]["field"] == "center_offset"
+    assert render_spec["encoding"]["x2"]["field"] == "funnel_end"
+    assert {"calculate": "datum.center_offset + datum.count", "as": "funnel_end"} in render_spec["transform"]
