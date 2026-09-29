@@ -84,6 +84,7 @@ class ChartAgentService:
             output = validate_chart_spec(semantic_spec)
             if output["overall_result"] != "pass":
                 raise ChartError("OUT-001", "semantic chart spec failed output validation", "output")
+            semantic_spec["validation"] = output
             render_spec = render_vega(semantic_spec)
             semantic_spec["render_spec"] = render_spec
             content = {"chart_type": decision["chart_type"], "dataset": dataset, "render_spec": render_spec, "semantic_spec": semantic_spec, "lineage": lineage}

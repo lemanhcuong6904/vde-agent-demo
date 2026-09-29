@@ -15,6 +15,16 @@ export function chartSpecMetadata(
   return [sourceLabel, ...chart.limitations.map((limitation) => `Limitation: ${limitation}`)];
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function renderableChartSpec(spec: Record<string, unknown>): Record<string, unknown> {
+  const projection = spec.render_spec;
+  if (isRecord(projection)) return projection;
+  return spec;
+}
+
 export function ChartView({ id }: { id: string }) {
   const isImmutable = id.startsWith("csp_");
   const legacyQuery = useChart(id);
@@ -22,7 +32,9 @@ export function ChartView({ id }: { id: string }) {
   const query = isImmutable ? immutableQuery : legacyQuery;
   const container = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
-  const spec = isImmutable ? immutableQuery.data?.chart_spec : legacyQuery.data?.spec;
+  const spec = isImmutable
+    ? immutableQuery.data && renderableChartSpec(immutableQuery.data.chart_spec)
+    : legacyQuery.data?.spec;
 
   useEffect(() => {
     const el = container.current;

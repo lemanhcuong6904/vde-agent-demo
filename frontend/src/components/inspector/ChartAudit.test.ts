@@ -7,4 +7,8 @@ describe("chartAuditLines", () => {
       "Chart: chart_x (revision 2)", "Dataset: sha256:x", "Inputs: 1", "Validation: scope", "Limitation: Gap",
     ]);
   });
+
+  it("falls back to validation overall_result when detailed checks are absent", () => {
+    expect(chartAuditLines({ logical_chart_id: "chart_x", version: 1, dataset_hash: "sha256:x", lineage: { input_artifact_refs: [] }, validation: { overall_result: "pass" }, limitations: [] } as never)).toContain("Validation: pass");
+  });
 });

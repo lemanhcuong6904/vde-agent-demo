@@ -29,6 +29,14 @@ def test_documented_demo_scenario_produces_valid_semantic_spec_and_renderer_proj
     artifact_id = result.chart_artifacts[0].removesuffix("@1")
     artifact = service.artifacts[artifact_id]
     assert validate_chart_spec(artifact["semantic_spec"])["overall_result"] == "pass"
+    assert artifact["semantic_spec"]["validation"]["checks"] == [
+        "schema",
+        "lineage",
+        "dataset",
+        "scope",
+        "renderer",
+        "presentation",
+    ]
     assert artifact["render_spec"]["data"]["values"] == artifact["dataset"]["records"]
 
 

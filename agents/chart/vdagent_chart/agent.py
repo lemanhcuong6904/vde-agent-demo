@@ -37,7 +37,7 @@ class ChartPluginAgent:
                     local = self._service.artifacts[local_ref.removesuffix("@1")]
                     persisted_spec = {**local["semantic_spec"], **local["render_spec"]}
                     lineage = {"input_artifact_refs": local["lineage"]}
-                    validation = {"overall_result": "pass"}
+                    validation = dict(local["semantic_spec"].get("validation", {"overall_result": "pass"}))
                     limitations = list(local.get("limitations", ()))
                     content_key = canonical_input_hash(
                         {
