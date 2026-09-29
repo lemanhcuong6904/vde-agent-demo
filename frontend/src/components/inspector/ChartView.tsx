@@ -5,7 +5,7 @@ import { useChart, useChartSpec } from "../../api/queries";
 import { ArtifactLink } from "../ArtifactLink";
 import { ChartAudit } from "./ChartAudit";
 
-/** Vega-Lite chart (`GET /api/charts/{id}`) rendered with vega-embed (loaded lazily). */
+/** Chart artifact metadata rendered beside the lazily loaded chart projection. */
 export function chartSpecMetadata(
   chart: Pick<ChartSpecDTO, "lineage" | "limitations">,
 ): string[] {
@@ -25,6 +25,26 @@ export function renderableChartSpec(spec: Record<string, unknown>): Record<strin
   return spec;
 }
 
+export function rendererForSpec(spec: Record<string, unknown>): "plotly" | "vega" {
+  return spec.renderer === "plotly" ? "plotly" : "vega";
+}
+
+export function plotlyRenderDependencies(spec: Record<string, unknown>): string[] {
+  return rendererForSpec(spec) === "plotly" ? ["mathjax/es5/tex-svg.js", "plotly.js-dist-min"] : ["vega-embed"];
+}
+
+async function loadPlotlyRenderer() {
+  const root = globalThis as typeof globalThis & { MathJax?: unknown };
+  if (!root.MathJax) {
+    root.MathJax = {
+      tex: { inlineMath: [["$", "$"], ["\\(", "\\)"]] },
+      svg: { fontCache: "global" },
+    };
+  }
+  await import("mathjax/es5/tex-svg.js");
+  return import("plotly.js-dist-min");
+}
+
 export function ChartView({ id }: { id: string }) {
   const isImmutable = id.startsWith("csp_");
   const legacyQuery = useChart(id);
@@ -42,13 +62,27 @@ export function ChartView({ id }: { id: string }) {
     let disposed = false;
     let finalize: (() => void) | undefined;
     setError(null);
-    import("vega-embed")
-      .then(({ default: embed }) =>
-        embed(el, { ...spec, width: "container", autosize: { type: "fit", contains: "padding" } } as VisualizationSpec, {
-          actions: false,
-          renderer: "svg",
-        }),
-      )
+    el.innerHTML = "";
+    const render =
+      rendererForSpec(spec) === "plotly"
+        ? loadPlotlyRenderer().then((Plotly) => {
+            const plotly = Plotly.default ?? Plotly;
+            return plotly
+              .newPlot(
+                el,
+                Array.isArray(spec.data) ? spec.data : [],
+                isRecord(spec.layout) ? spec.layout : {},
+                isRecord(spec.config) ? spec.config : {},
+              )
+              .then(() => ({ finalize: () => plotly.purge(el) }));
+          })
+        : import("vega-embed").then(({ default: embed }) =>
+            embed(el, { ...spec, width: "container", autosize: { type: "fit", contains: "padding" } } as VisualizationSpec, {
+              actions: false,
+              renderer: "svg",
+            }),
+          );
+    render
       .then((result) => {
         if (disposed) result.finalize();
         else finalize = () => result.finalize();

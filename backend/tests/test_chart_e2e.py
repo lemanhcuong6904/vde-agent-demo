@@ -28,5 +28,7 @@ async def test_chart_plugin_persists_an_owner_scoped_chart_spec_through_the_engi
     assert chart_id is not None, [(row["role"], row["content"]) for row in transcript]
     stored = await artifacts.get_chart_spec(harness.db, ALICE, chart_id.group(1))
     assert stored is not None
-    assert stored["chart_spec"]["$schema"].endswith("vega-lite/v5.json")
+    assert stored["chart_spec"]["renderer"] == "plotly"
+    assert stored["chart_spec"]["render_spec"]["renderer"] == "plotly"
+    assert stored["chart_spec"]["vega_render_spec"]["$schema"].endswith("vega-lite/v5.json")
     assert stored["lineage"]["input_artifact_refs"] == ["metric_price_trend@1"]

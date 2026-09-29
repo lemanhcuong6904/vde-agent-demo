@@ -16,6 +16,8 @@ def build_presentation(
     title: str,
     subtitle: str | None = None,
     annotations: list[dict[str, Any]] | None = None,
+    axes: dict[str, dict[str, Any]] | None = None,
+    theme_ref: str = "dashboard/default",
 ) -> dict[str, Any]:
     if _CAUSAL.search(title) or (subtitle and _CAUSAL.search(subtitle)):
         raise ChartError(
@@ -28,9 +30,17 @@ def build_presentation(
         raise ChartError("SEM-002", "chart title must not be empty", "semantic")
     presentation: dict[str, Any] = {
         "title": clean_title,
+        "title_spec": {"format": "plain", "value": clean_title},
         "subtitle": sanitize_text(_HTML.sub("", subtitle or "")),
+        "subtitle_spec": {"format": "plain", "value": sanitize_text(_HTML.sub("", subtitle or ""))},
         "language": "vi-VN",
+        "theme_ref": theme_ref,
     }
+    if axes:
+        if "x" in axes:
+            presentation["x_axis"] = dict(axes["x"])
+        if "y" in axes:
+            presentation["y_axis"] = dict(axes["y"])
     if annotations:
         presentation["annotations"] = [
             {

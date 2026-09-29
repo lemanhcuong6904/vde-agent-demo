@@ -1,5 +1,8 @@
+/// <reference types="node" />
+
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { chartSpecMetadata, renderableChartSpec } from "./ChartView";
+import { chartSpecMetadata, plotlyRenderDependencies, renderableChartSpec, rendererForSpec } from "./ChartView";
 
 describe("chartSpecMetadata", () => {
   it("makes immutable lineage and limitations visible to a renderer user", () => {
@@ -25,5 +28,23 @@ describe("chartSpecMetadata", () => {
     };
 
     expect(renderableChartSpec(semantic)).toEqual(semantic.render_spec);
+  });
+
+  it("detects plotly projections as the primary renderer", () => {
+    const projection = { renderer: "plotly", data: [], layout: {}, config: {} };
+
+    expect(rendererForSpec(projection)).toBe("plotly");
+  });
+
+  it("loads MathJax before Plotly so latex axis labels are typeset", () => {
+    const projection = { renderer: "plotly", data: [], layout: {}, config: {} };
+
+    expect(plotlyRenderDependencies(projection)).toEqual(["mathjax/es5/tex-svg.js", "plotly.js-dist-min"]);
+  });
+
+  it("gives Plotly charts a real canvas height instead of a collapsed strip", () => {
+    const css = readFileSync("src/styles.css", "utf8");
+
+    expect(css).toMatch(/\.chart-canvas\s*\{[^}]*min-height:\s*(3[6-9]\d|[4-9]\d\d)px/s);
   });
 });

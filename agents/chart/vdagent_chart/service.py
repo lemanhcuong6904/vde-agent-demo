@@ -17,6 +17,7 @@ from .schema import normalize_artifact
 from .spec_builder import build_semantic_spec
 from .output_validation import validate_chart_spec
 from .presentation import build_presentation
+from .rendering.plotly import render_plotly
 from .selection import select_chart
 from .telemetry import TelemetryPort
 from .validation import validate_input
@@ -130,7 +131,8 @@ class ChartAgentService:
             if output["overall_result"] != "pass":
                 raise ChartError("OUT-001", "semantic chart spec failed output validation", "output")
             semantic_spec["validation"] = output
-            render_spec = render_vega(semantic_spec)
+            semantic_spec["vega_render_spec"] = render_vega(semantic_spec)
+            render_spec = render_plotly(semantic_spec)
             semantic_spec["render_spec"] = render_spec
             content = {"chart_type": decision["chart_type"], "dataset": dataset, "render_spec": render_spec, "semantic_spec": semantic_spec, "lineage": lineage}
             content_hash = "sha256:" + hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
@@ -155,7 +157,7 @@ class ChartAgentService:
             "task_id": task.task_id,
             "policy_version": task.policy_ref,
             "validator_version": "chart-spec/2.0",
-            "renderer_version": "vega-lite/v5",
+            "renderer_version": "plotly.js",
         }
         self._record("chart.started", {**event_context, "target_count": len(task.visual_targets)})
         suggestions: dict[str, object] = {}
