@@ -23,6 +23,47 @@ from .validation import validate_input
 from .vega import render_vega
 
 
+def _reasoning_for(llm_suggestions: Mapping[str, object] | None, target_id: str) -> dict[str, object]:
+    value = (llm_suggestions or {}).get(target_id)
+    return value if isinstance(value, dict) else {}
+
+
+def _validated_encoding(reasoning: Mapping[str, object], dataset: Mapping[str, object]) -> dict[str, object] | None:
+    raw = reasoning.get("encoding")
+    if not isinstance(raw, Mapping):
+        return None
+    fields = {
+        item.get("name")
+        for item in dataset.get("schema", ())
+        if isinstance(item, Mapping) and isinstance(item.get("name"), str)
+    }
+    encoding: dict[str, object] = {}
+    for channel in ("x", "y", "theta", "color", "detail"):
+        value = raw.get(channel)
+        if isinstance(value, Mapping) and value.get("field") in fields:
+            encoding[channel] = dict(value)
+    sort = raw.get("sort")
+    if isinstance(sort, Mapping) and sort.get("field") in fields and isinstance(encoding.get("x"), dict):
+        field = str(sort["field"])
+        order = "descending" if sort.get("order") == "descending" else "ascending"
+        encoding["x"]["sort"] = {"field": field, "order": order}
+    return encoding or None
+
+
+def _presentation_from_reasoning(
+    reasoning: Mapping[str, object],
+    default_title: str,
+    default_subtitle: str,
+) -> dict[str, object]:
+    raw = reasoning.get("presentation")
+    if not isinstance(raw, Mapping):
+        return build_presentation(default_title, default_subtitle)
+    title = str(raw.get("title") or default_title)
+    subtitle = str(raw.get("subtitle") or default_subtitle)
+    annotations = raw.get("annotations")
+    return build_presentation(title, subtitle, annotations if isinstance(annotations, list) else None)
+
+
 class ChartAgentService:
     """Deterministic execution entry point for fixture-backed Chart Agent demos."""
 
@@ -39,7 +80,7 @@ class ChartAgentService:
         self.artifacts: dict[str, dict] = {}
 
     def execute(
-        self, task: ChartTaskInput, llm_suggestions: Mapping[str, str | None] | None = None
+        self, task: ChartTaskInput, llm_suggestions: Mapping[str, object] | None = None
     ) -> ChartTaskResult:
         try:
             resolved = [self._store.get_exact(ref) for ref in task.artifact_refs]
@@ -59,6 +100,7 @@ class ChartAgentService:
             try:
                 target_context = replace(context, task=replace(task, visual_targets=(target,)))
                 binding = build_evidence_map(target_context)[target.target_id]
+                reasoning = _reasoning_for(llm_suggestions, target.target_id)
                 decision = select_chart(
                     target,
                     policy,
@@ -71,7 +113,7 @@ class ChartAgentService:
                 errors.append({"target_id": target.target_id, "code": exc.code, "message": exc.message})
                 continue
             title = f"{target.visual_question.replace('_', ' ').title()} — VHop"
-            presentation = build_presentation(title, f"Snapshot {task.scope.snapshot_id or 'n/a'}")
+            presentation = _presentation_from_reasoning(reasoning, title, f"Snapshot {task.scope.snapshot_id or 'n/a'}")
             chart_id = f"chart_{task.task_id}_{target.target_id}"
             lineage = [f"{a['artifact_id']}@{a['version']}" for a in resolved]
             semantic_spec = build_semantic_spec(
@@ -81,6 +123,9 @@ class ChartAgentService:
                 dataset=dataset, selection=decision, presentation=presentation,
                 lineage={"input_artifact_refs": lineage}, validation={"overall_result": "pass"},
             )
+            encoding = _validated_encoding(reasoning, dataset)
+            if encoding:
+                semantic_spec["encoding"] = encoding
             output = validate_chart_spec(semantic_spec)
             if output["overall_result"] != "pass":
                 raise ChartError("OUT-001", "semantic chart spec failed output validation", "output")
@@ -113,14 +158,49 @@ class ChartAgentService:
             "renderer_version": "vega-lite/v5",
         }
         self._record("chart.started", {**event_context, "target_count": len(task.visual_targets)})
-        suggestions: dict[str, str | None] = {}
+        suggestions: dict[str, object] = {}
         if self._reasoner is not None:
             policy = load_policy(task.policy_ref)
+            try:
+                resolved = [self._store.get_exact(ref) for ref in task.artifact_refs]
+            except ChartError:
+                resolved = []
             for target in task.visual_targets:
                 try:
-                    suggestions[target.target_id] = await self._reasoner.suggest(
-                        target.visual_question, policy.allowed_chart_types
-                    )
+                    payload = {
+                        "visual_target": {
+                            "target_id": target.target_id,
+                            "purpose": target.purpose,
+                            "visual_question": target.visual_question,
+                            "preferred_chart_type": target.preferred_chart_type,
+                        },
+                        "intent": {
+                            "purpose": task.intent.purpose,
+                            "business_question": task.intent.business_question,
+                            "presentation_context": task.intent.presentation_context,
+                        },
+                        "scope": {
+                            "project_ids": task.scope.project_ids,
+                            "snapshot_id": task.scope.snapshot_id,
+                            "data_grain": task.scope.data_grain,
+                        },
+                        "artifacts": [
+                            {
+                                "artifact_id": artifact["artifact_id"],
+                                "artifact_type": artifact["artifact_type"],
+                                "scope": artifact.get("scope", {}),
+                                "payload": artifact.get("payload", {}),
+                            }
+                            for artifact in resolved
+                            if not target.artifact_ids or artifact["artifact_id"] in target.artifact_ids
+                        ],
+                    }
+                    if hasattr(self._reasoner, "decide"):
+                        suggestions[target.target_id] = await self._reasoner.decide(payload, policy.allowed_chart_types)
+                    else:
+                        suggestions[target.target_id] = await self._reasoner.suggest(
+                            target.visual_question, policy.allowed_chart_types
+                        )
                 except Exception:
                     suggestions[target.target_id] = None
                     self._record("chart.llm.unavailable", {**event_context, "target_count": 1})

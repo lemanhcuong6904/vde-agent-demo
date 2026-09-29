@@ -110,6 +110,58 @@
       }
     },
     {
+      "artifact_id": "comparison_dom_peer",
+      "version": 3,
+      "artifact_type": "comparison",
+      "run_id": "run_vhop_demo_001",
+      "status": "validated",
+      "content_hash": "sha256:comparison-dom-peer-v3",
+      "scope": {
+        "project_ids": ["VHOP"],
+        "snapshot_id": "2026-06-30",
+        "data_grain": "group"
+      },
+      "payload": {
+        "metric_ids": ["metric_dom_target", "metric_dom_peer"],
+        "evidence_ids": ["evidence_dom_peer"],
+        "comparison_metric": "dom",
+        "target_value": 126.0,
+        "peer_aggregate": 91.0,
+        "benchmark": 91.0,
+        "gap": 35.0,
+        "peer_definition": {
+          "project_id": "VHOP",
+          "property_type": "apartment",
+          "bedrooms": 2,
+          "area_range_m2": [70, 80],
+          "building_class": "similar",
+          "peer_count": 24
+        },
+        "peer_population": {
+          "members": [
+            {"unit_id": "A12-09", "area": "A01", "dom": 82.0},
+            {"unit_id": "A12-10", "area": "A01", "dom": 92.0},
+            {"unit_id": "A13-03", "area": "A02", "dom": 88.0},
+            {"unit_id": "A13-06", "area": "A02", "dom": 100.0},
+            {"unit_id": "A14-02", "area": "A03", "dom": 91.0}
+          ]
+        },
+        "peer_breakdown": [
+          {"label": "Peer - A01", "dom": 87.0, "cohort": "peer"},
+          {"label": "Peer - A02", "dom": 94.0, "cohort": "peer"},
+          {"label": "Peer - A03", "dom": 91.0, "cohort": "peer"}
+        ],
+        "display_records": [
+          {"label": "A12-08", "dom": 126.0, "cohort": "target"},
+          {"label": "Peer - A01", "dom": 87.0, "cohort": "peer"},
+          {"label": "Peer - A02", "dom": 94.0, "cohort": "peer"},
+          {"label": "Peer - A03", "dom": 91.0, "cohort": "peer"}
+        ],
+        "unit": "day",
+        "grain": "group"
+      }
+    },
+    {
       "artifact_id": "metric_price_trend",
       "version": 1,
       "artifact_type": "metric",

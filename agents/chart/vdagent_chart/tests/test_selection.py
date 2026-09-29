@@ -29,6 +29,19 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(decision["chart_type"], "line")
         self.assertEqual(decision["reason_code"], "SEL_POLICY_VISUAL_QUESTION")
 
+    def test_valid_structured_llm_decision_can_override_user_preference(self) -> None:
+        policy = load_policy("chart-policy/demo-1.0")
+
+        decision = select_chart(
+            VisualTarget("a", "trend", preferred_chart_type="line"),
+            policy,
+            llm_suggestion={"selected_chart_type": "area", "candidates": [{"chart_type": "area"}]},
+        )
+
+        self.assertEqual(decision["chart_type"], "area")
+        self.assertEqual(decision["reason_code"], "SEL_LLM_ACCEPTED")
+        self.assertEqual(decision["llm_candidates"], [{"chart_type": "area"}])
+
     def test_accepts_area_as_a_policy_compatible_trend_representation(self) -> None:
         policy = load_policy("chart-policy/demo-1.0")
 

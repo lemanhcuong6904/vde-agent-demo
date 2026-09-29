@@ -42,12 +42,12 @@
         },
         {
           "artifact_id": "comparison_dom_peer",
-          "version": 2,
-          "expected_hash": "sha256:comparison-dom-peer-v2"
+          "version": 3,
+          "expected_hash": "sha256:comparison-dom-peer-v3"
         }
       ],
       "policy_ref": "chart-policy/demo-1.0",
-      "idempotency_key": "dom-peer-v2"
+      "idempotency_key": "dom-peer-v3"
     },
     {
       "name": "price_trend",

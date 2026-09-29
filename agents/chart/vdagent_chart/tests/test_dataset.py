@@ -22,7 +22,7 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(data["presentation_transforms"], [])
         self.assertEqual(data["mode"], "inline")
 
-    def test_target_vs_peer_uses_the_validated_comparison_values(self) -> None:
+    def test_target_vs_peer_uses_the_validated_comparison_values_and_peer_context(self) -> None:
         task = load_demo_task("dom_peer")
         store = FixtureArtifactStore.demo()
         artifacts = [store.get_exact(ref) for ref in task.artifact_refs]
@@ -31,8 +31,15 @@ class DatasetTests(unittest.TestCase):
 
         self.assertEqual(
             data["records"],
-            [{"label": "A12-08", "dom": 126.0}, {"label": "Peer group", "dom": 91.0}],
+            [
+                {"label": "A12-08", "dom": 126.0, "cohort": "target"},
+                {"label": "Peer - A01", "dom": 87.0, "cohort": "peer"},
+                {"label": "Peer - A02", "dom": 94.0, "cohort": "peer"},
+                {"label": "Peer - A03", "dom": 91.0, "cohort": "peer"},
+            ],
         )
+        self.assertEqual(data["peer_definition"]["peer_count"], 24)
+        self.assertEqual(data["peer_population"]["members"][0]["unit_id"], "A12-09")
         self.assertEqual(data["unit"], "day")
 
     def test_assembly_preserves_values_nulls_and_a_stable_hash(self) -> None:

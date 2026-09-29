@@ -27,6 +27,7 @@ class ProfileTests(unittest.TestCase):
 
         profile = profile_target(context, build_evidence_map(context)["vt_dom_peer"])
 
-        self.assertEqual(profile.row_count, 2)
+        self.assertEqual(profile.row_count, 4)
         self.assertEqual(profile.grain, "group")
         self.assertEqual(profile.metric_fields, ("dom",))
+        self.assertEqual(profile.dimension_fields, ("cohort", "label"))

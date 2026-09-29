@@ -58,6 +58,7 @@ def assemble_dataset(
             raise TypeError("legacy dataset assembly requires artifact dictionaries")
         source = _metric_for(target, artifacts)
         records = source["payload"]["records"]
+    metadata_source = source if isinstance(target, ResolvedChartContext) else source["payload"]
     canonical = json.dumps(records, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     fields = sorted({field for record in records for field in record})
     return {
@@ -69,6 +70,7 @@ def assemble_dataset(
         "presentation_transforms": [],
         "null_handling": "preserve",
         "omitted_count": 0,
-        "unit": source.get("unit") if isinstance(target, ResolvedChartContext) else source["payload"].get("unit"),
-        "grain": source.get("grain") if isinstance(target, ResolvedChartContext) else source["payload"].get("grain"),
+        "unit": metadata_source.get("unit"),
+        "grain": metadata_source.get("grain"),
+        **{key: metadata_source[key] for key in ("peer_definition", "peer_population", "peer_breakdown", "comparison_metric", "target_value", "peer_aggregate", "gap") if key in metadata_source},
     }

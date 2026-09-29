@@ -24,7 +24,7 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(task.schema_version, "chart-task/2.0")
         self.assertEqual(task.intent.purpose, "direct_visualization")
         self.assertEqual(task.visual_targets[0].target_id, "vt_dom_peer")
-        self.assertEqual(task.artifact_refs[-1].version, 2)
+        self.assertEqual(task.artifact_refs[-1].version, 3)
 
     def test_rejects_unknown_or_invalid_task_fields_before_reasoning(self) -> None:
         unknown = copy.deepcopy(self.task)
