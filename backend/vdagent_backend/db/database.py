@@ -46,13 +46,22 @@ def _upgrade_chart_specs(conn: sqlite3.Connection) -> None:
     table_sql = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chart_specs'"
     ).fetchone()[0].lower()
-    if "version = 1" not in table_sql:
+    columns = {row[1]: row for row in conn.execute("PRAGMA table_info(chart_specs)")}
+    missing_timestamp_default = not columns["created_at"][4]
+    if "version = 1" not in table_sql and not missing_timestamp_default:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS ix_chart_specs_logical "
             "ON chart_specs(user_id, logical_chart_id, version)"
         )
         return
 
+    alias_rows = conn.execute(
+        "SELECT user_id, idempotency_key, chart_spec_id, content_hash "
+        "FROM chart_spec_idempotency_keys"
+    ).fetchall()
+    # SQLite rewrites foreign-key targets during ALTER TABLE ... RENAME.  Drop
+    # and recreate this dependent table so it never keeps chart_specs_legacy.
+    conn.execute("DROP TABLE chart_spec_idempotency_keys")
     conn.execute("ALTER TABLE chart_specs RENAME TO chart_specs_legacy")
     conn.execute(
         "CREATE TABLE chart_specs ("
@@ -62,7 +71,8 @@ def _upgrade_chart_specs(conn: sqlite3.Connection) -> None:
         "status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('ready','failed')), title TEXT NOT NULL, "
         "chart_spec_json TEXT NOT NULL, dataset_hash TEXT NOT NULL, lineage_json TEXT NOT NULL DEFAULT '{}', "
         "validation_json TEXT NOT NULL DEFAULT '{}', limitations_json TEXT NOT NULL DEFAULT '[]', "
-        "content_hash TEXT NOT NULL, created_at TEXT NOT NULL)"
+        "content_hash TEXT NOT NULL, "
+        "created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')))"
     )
     conn.execute(
         "INSERT INTO chart_specs (id, user_id, invocation_id, idempotency_key, logical_chart_id, version, "
@@ -73,6 +83,17 @@ def _upgrade_chart_specs(conn: sqlite3.Connection) -> None:
         "FROM chart_specs_legacy"
     )
     conn.execute("DROP TABLE chart_specs_legacy")
+    conn.execute(
+        "CREATE TABLE chart_spec_idempotency_keys ("
+        "user_id TEXT NOT NULL REFERENCES users(id), idempotency_key TEXT NOT NULL, "
+        "chart_spec_id TEXT NOT NULL REFERENCES chart_specs(id), content_hash TEXT NOT NULL, "
+        "PRIMARY KEY (user_id, idempotency_key))"
+    )
+    conn.executemany(
+        "INSERT INTO chart_spec_idempotency_keys "
+        "(user_id, idempotency_key, chart_spec_id, content_hash) VALUES (?, ?, ?, ?)",
+        alias_rows,
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS ix_chart_specs_user ON chart_specs(user_id, created_at)")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS ix_chart_specs_logical "

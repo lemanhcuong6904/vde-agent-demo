@@ -28,6 +28,48 @@ def test_schema_upgrades_legacy_chart_specs_with_audit_metadata(tmp_path) -> Non
     assert {"lineage_json", "validation_json", "limitations_json"} <= columns
 
 
+def test_migrated_chart_specs_keep_created_at_default(tmp_path) -> None:
+    path = tmp_path / "version_one.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE chart_specs (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, invocation_id TEXT NOT NULL,"
+            " idempotency_key TEXT NOT NULL, version INTEGER NOT NULL CHECK (version = 1),"
+            " status TEXT NOT NULL, title TEXT NOT NULL, chart_spec_json TEXT NOT NULL, dataset_hash TEXT NOT NULL,"
+            " lineage_json TEXT NOT NULL DEFAULT '{}', validation_json TEXT NOT NULL DEFAULT '{}',"
+            " limitations_json TEXT NOT NULL DEFAULT '[]', content_hash TEXT NOT NULL,"
+            " created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')))"
+        )
+
+    apply_schema(str(path))
+
+    with sqlite3.connect(path) as conn:
+        created_at = next(row for row in conn.execute("PRAGMA table_info(chart_specs)") if row[1] == "created_at")
+        alias_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chart_spec_idempotency_keys'"
+        ).fetchone()[0]
+    assert "strftime" in str(created_at[4]).lower()
+    assert "references chart_specs(" in alias_sql.lower()
+
+
+def test_schema_repairs_already_migrated_chart_specs_missing_timestamp_default(tmp_path) -> None:
+    path = tmp_path / "broken_migration.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE chart_specs (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, invocation_id TEXT NOT NULL,"
+            " idempotency_key TEXT NOT NULL, logical_chart_id TEXT NOT NULL,"
+            " version INTEGER NOT NULL CHECK (version >= 1), status TEXT NOT NULL, title TEXT NOT NULL,"
+            " chart_spec_json TEXT NOT NULL, dataset_hash TEXT NOT NULL, lineage_json TEXT NOT NULL DEFAULT '{}',"
+            " validation_json TEXT NOT NULL DEFAULT '{}', limitations_json TEXT NOT NULL DEFAULT '[]',"
+            " content_hash TEXT NOT NULL, created_at TEXT NOT NULL)"
+        )
+
+    apply_schema(str(path))
+
+    with sqlite3.connect(path) as conn:
+        created_at = next(row for row in conn.execute("PRAGMA table_info(chart_specs)") if row[1] == "created_at")
+    assert "strftime" in str(created_at[4]).lower()
+
+
 @pytest.mark.asyncio
 async def test_chart_spec_is_user_scoped_immutable_and_idempotent(harness) -> None:
     task_id = await harness.post("data", "prepare a chart")
