@@ -72,5 +72,6 @@ def assemble_dataset(
         "omitted_count": 0,
         "unit": metadata_source.get("unit"),
         "grain": metadata_source.get("grain"),
+        **{key: metadata_source[key] for key in ("histogram_mode", "map_mode", "treemap_path") if key in metadata_source},
         **{key: metadata_source[key] for key in ("peer_definition", "peer_population", "peer_breakdown", "comparison_metric", "target_value", "peer_aggregate", "gap") if key in metadata_source},
     }

@@ -4,6 +4,14 @@ from .contracts import ChartPolicy, ChartTaskInput
 from .errors import ChartError
 
 
+def _comparison_backed_target_vs_peer(task: ChartTaskInput, artifacts: list[dict]) -> bool:
+    comparison_ids = {artifact["artifact_id"] for artifact in artifacts if artifact["artifact_type"] == "comparison"}
+    return any(
+        target.visual_question == "target_vs_peer" and comparison_ids.intersection(target.artifact_ids)
+        for target in task.visual_targets
+    )
+
+
 def validate_input(task: ChartTaskInput, artifacts: list[dict], policy: ChartPolicy) -> dict:
     if task.schema_version != "chart-task/2.0":
         raise ChartError("INP-001", "unsupported chart task schema", "input")
@@ -22,7 +30,11 @@ def validate_input(task: ChartTaskInput, artifacts: list[dict], policy: ChartPol
         artifact_scope = artifact.get("scope", {})
         if task.scope.snapshot_id and artifact_scope.get("snapshot_id") != task.scope.snapshot_id:
             raise ChartError("DAT-003", f"snapshot mismatch for {artifact['artifact_id']}", "data_consistency")
-        if task.scope.data_grain and artifact_scope.get("data_grain") != task.scope.data_grain:
+        if (
+            task.scope.data_grain
+            and artifact_scope.get("data_grain") != task.scope.data_grain
+            and not (artifact["artifact_type"] == "metric" and _comparison_backed_target_vs_peer(task, artifacts))
+        ):
             raise ChartError("DAT-004", f"grain mismatch for {artifact['artifact_id']}", "data_consistency")
         if task.scope.project_ids and not set(task.scope.project_ids).issubset(artifact_scope.get("project_ids", [])):
             raise ChartError("SCP-001", f"scope mismatch for {artifact['artifact_id']}", "scope")

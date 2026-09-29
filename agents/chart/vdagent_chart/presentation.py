@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 import re
 
@@ -37,9 +38,9 @@ def build_presentation(
         "theme_ref": theme_ref,
     }
     if axes:
-        if "x" in axes:
+        if isinstance(axes.get("x"), Mapping):
             presentation["x_axis"] = dict(axes["x"])
-        if "y" in axes:
+        if isinstance(axes.get("y"), Mapping):
             presentation["y_axis"] = dict(axes["y"])
     if annotations:
         presentation["annotations"] = [

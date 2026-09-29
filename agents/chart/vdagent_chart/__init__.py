@@ -22,5 +22,6 @@ def make_reasoner(env: Mapping[str, str]) -> VisualReasoner | None:
 
 
 def setup(api: PluginAPI, opts: Mapping[str, Any]) -> None:
-    service = ChartAgentService(FixtureArtifactStore.demo(), reasoner=make_reasoner(read_env()))
-    api.register_agent(name=NAME, description=DESCRIPTION, agent=ChartPluginAgent(service))
+    reasoner = make_reasoner(read_env())
+    service = ChartAgentService(FixtureArtifactStore.demo(), reasoner=reasoner)
+    api.register_agent(name=NAME, description=DESCRIPTION, agent=ChartPluginAgent(service, upstream_reasoner=reasoner))

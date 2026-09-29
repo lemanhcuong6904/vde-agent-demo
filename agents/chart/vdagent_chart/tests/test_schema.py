@@ -15,7 +15,8 @@ ARTIFACTS_FILE = Path(__file__).parents[1] / "demo" / "artifacts.json"
 
 class SchemaTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.task = json.loads(TASKS_FILE.read_text(encoding="utf-8"))["tasks"][0]
+        tasks = json.loads(TASKS_FILE.read_text(encoding="utf-8"))["tasks"]
+        self.task = next(task for task in tasks if task["name"] == "dom_peer")
         self.artifact = json.loads(ARTIFACTS_FILE.read_text(encoding="utf-8"))["artifacts"][0]
 
     def test_parses_a_pinned_demo_task_with_normalized_intent(self) -> None:

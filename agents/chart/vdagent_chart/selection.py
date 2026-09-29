@@ -14,7 +14,20 @@ QUESTION_DEFAULTS = {
 }
 
 QUESTION_COMPATIBLE_TYPES = {
+    "current_value": ("kpi_card", "bullet"),
     "trend": ("line", "area"),
+    "comparison": ("bar", "grouped_bar"),
+    "target_vs_peer": ("bar", "bullet"),
+    "composition": ("pie", "stacked_bar", "treemap"),
+    "distribution": ("histogram", "box_plot"),
+    "distribution_comparison": ("box_plot",),
+    "relationship": ("scatter",),
+    "matrix": ("heatmap",),
+    "geospatial": ("map",),
+    "funnel": ("funnel",),
+    "additive_change": ("waterfall",),
+    "hierarchy": ("treemap",),
+    "actual_vs_target": ("bullet",),
 }
 
 

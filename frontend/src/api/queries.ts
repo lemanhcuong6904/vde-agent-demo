@@ -64,11 +64,17 @@ export function useDataset(id: string, offset: number, limit: number) {
   });
 }
 
+/** Immutable ChartSpecs use `/api/chart-specs`; `ch_` ids use the legacy endpoint. */
+export function shouldLoadLegacyChart(id: string): boolean {
+  return !id.startsWith("csp_");
+}
+
 export function useChart(id: string) {
   const api = useApi();
   return useQuery({
     queryKey: queryKeys.chart(id),
     queryFn: () => api.getChart(id),
+    enabled: shouldLoadLegacyChart(id),
     staleTime: Infinity,
   });
 }

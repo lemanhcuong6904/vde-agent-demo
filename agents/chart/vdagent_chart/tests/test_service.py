@@ -10,6 +10,23 @@ from vdagent_chart.service import ChartAgentService
 
 
 class ServiceTests(unittest.TestCase):
+    def test_all_standard_demo_scenarios_produce_chart_artifacts(self) -> None:
+        service = ChartAgentService(FixtureArtifactStore.demo())
+
+        for scenario in (
+            "dom_peer",
+            "price_trend",
+            "inventory_composition",
+            "dom_distribution",
+            "price_dom_relationship",
+            "sales_funnel",
+            "area_month_heatmap",
+        ):
+            with self.subTest(scenario=scenario):
+                result = service.execute(load_demo_task(scenario))
+                self.assertEqual(result.status, "success")
+                self.assertTrue(result.chart_artifacts)
+
     def test_creates_a_validated_chart_spec_for_a_demo_task(self) -> None:
         result = ChartAgentService(FixtureArtifactStore.demo()).execute(load_demo_task("price_trend"))
         self.assertEqual(result.status, "success")
@@ -32,3 +49,27 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result.target_results[0].status, "success")
         self.assertEqual(result.target_results[1].reason_code, "DEP-005")
         self.assertEqual(result.errors[0]["target_id"], "broken")
+
+    def test_uses_llm_chart_plan_for_selection_encoding_and_presentation_under_guardrails(self) -> None:
+        service = ChartAgentService(FixtureArtifactStore.demo())
+        task = load_demo_task("line")
+
+        result = service.execute(
+            task,
+            {
+                "vt_line": {
+                    "selection": {"chart_type": "area", "reason_codes": ["LLM_SEMANTIC_MATCH"]},
+                    "encoding": {
+                        "x": {"field": "invented_month", "type": "temporal"},
+                        "y": {"field": "price_m2", "type": "quantitative"},
+                    },
+                    "presentation": {"title": "Price movement", "subtitle": "LLM-authored presentation"},
+                }
+            },
+        )
+
+        artifact = service.artifacts[result.chart_artifacts[0].removesuffix("@1")]
+        self.assertEqual(artifact["semantic_spec"]["chart_type"], "area")
+        self.assertEqual(artifact["semantic_spec"]["presentation"]["title"], "Price movement")
+        self.assertEqual(artifact["semantic_spec"]["encoding"]["x"]["field"], "month")
+        self.assertEqual(artifact["semantic_spec"]["encoding"]["y"]["field"], "price_m2")

@@ -11,8 +11,12 @@ POLICY_DIR = Path(__file__).parent / "demo"
 
 def load_policy(ruleset_version: str) -> ChartPolicy:
     if ruleset_version != "chart-policy/demo-1.0":
-        raise ChartError("POL-001", f"unknown chart policy {ruleset_version!r}", "policy")
-    raw = json.loads((POLICY_DIR / "chart-policy-demo-1.0.json").read_text(encoding="utf-8"))
+        raise ChartError(
+            "POL-001", f"unknown chart policy {ruleset_version!r}", "policy"
+        )
+    raw = json.loads(
+        (POLICY_DIR / "chart-policy-demo-1.0.json").read_text(encoding="utf-8")
+    )
     return ChartPolicy(
         ruleset_version=raw["ruleset_version"],
         allowed_chart_types=tuple(raw["allowed_chart_types"]),
